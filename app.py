@@ -440,6 +440,335 @@ class VolumeSurgeAnalyzer:
             logger.error(f"Failed to store volume surge: {e}")
 
 
+class OrderBookSetupAnalyzer:
+    """Professional order book setup detection for trading opportunities"""
+    
+    def __init__(self):
+        self.db_path = "orderbook_setups.db"
+        self.init_database()
+        
+    def init_database(self):
+        """Initialize database for order book setups"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS orderbook_setups (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                symbol TEXT,
+                setup_type TEXT,
+                direction TEXT,
+                entry_price REAL,
+                target_price REAL,
+                stop_loss REAL,
+                risk_reward_ratio REAL,
+                confidence TEXT,
+                wall_size REAL,
+                wall_distance_pct REAL,
+                setup_sent BOOLEAN DEFAULT 0
+            )
+        ''')
+        conn.commit()
+        conn.close()
+        
+    def find_liquidity_gaps(self, bids: List[List[float]], asks: List[List[float]], mid_price: float) -> Dict:
+        """Identify significant liquidity gaps in the order book"""
+        gaps = {'bid_gaps': [], 'ask_gaps': []}
+        
+        # Analyze bid gaps (support side)
+        for i in range(len(bids) - 1):
+            current_price = bids[i][0]
+            next_price = bids[i + 1][0]
+            gap_size = ((current_price - next_price) / current_price) * 100
+            
+            if gap_size > 0.1:  # Gap larger than 0.1%
+                distance_from_mid = ((mid_price - current_price) / mid_price) * 100
+                if distance_from_mid < 5:  # Within 5% of mid price
+                    gaps['bid_gaps'].append({
+                        'start_price': current_price,
+                        'end_price': next_price,
+                        'gap_size_pct': gap_size,
+                        'distance_from_mid_pct': distance_from_mid
+                    })
+        
+        # Analyze ask gaps (resistance side)
+        for i in range(len(asks) - 1):
+            current_price = asks[i][0]
+            next_price = asks[i + 1][0]
+            gap_size = ((next_price - current_price) / current_price) * 100
+            
+            if gap_size > 0.1:  # Gap larger than 0.1%
+                distance_from_mid = ((current_price - mid_price) / mid_price) * 100
+                if distance_from_mid < 5:  # Within 5% of mid price
+                    gaps['ask_gaps'].append({
+                        'start_price': current_price,
+                        'end_price': next_price,
+                        'gap_size_pct': gap_size,
+                        'distance_from_mid_pct': distance_from_mid
+                    })
+        
+        return gaps
+    
+    def analyze_wall_strength(self, orders: List[List[float]], is_bid: bool = True) -> List[Dict]:
+        """Analyze order wall strength and significance"""
+        if not orders:
+            return []
+            
+        # Calculate statistics
+        sizes = [qty for _, qty in orders[:200]]  # Analyze first 200 orders
+        if not sizes:
+            return []
+            
+        avg_size = statistics.mean(sizes)
+        median_size = statistics.median(sizes)
+        std_size = statistics.stdev(sizes) if len(sizes) > 1 else 0
+        
+        walls = []
+        for price, qty in orders:
+            # Define wall criteria
+            is_large_wall = qty >= avg_size * 8  # 8x average size
+            is_huge_wall = qty >= avg_size * 15  # 15x average size
+            is_mega_wall = qty >= avg_size * 25  # 25x average size
+            
+            if is_large_wall:
+                if is_mega_wall:
+                    wall_strength = "MEGA"
+                elif is_huge_wall:
+                    wall_strength = "HUGE"
+                else:
+                    wall_strength = "LARGE"
+                    
+                walls.append({
+                    'price': price,
+                    'quantity': qty,
+                    'strength': wall_strength,
+                    'size_ratio': qty / avg_size,
+                    'is_bid': is_bid
+                })
+                
+        return walls[:10]  # Return top 10 walls
+    
+    def detect_breakout_setups(self, analysis: Dict, symbol: str) -> List[Dict]:
+        """Detect breakout setups based on wall analysis"""
+        setups = []
+        mid_price = analysis['mid_price']
+        significant_bids = analysis.get('significant_bids', [])
+        significant_asks = analysis.get('significant_asks', [])
+        
+        # Bullish breakout setups (breaking resistance walls)
+        for ask in significant_asks[:3]:  # Top 3 resistance levels
+            if ask['distance_pct'] < 3:  # Within 3% of current price
+                entry_price = ask['price'] * 1.001  # Entry slightly above wall
+                
+                # Find next resistance for target
+                next_resistance = None
+                for next_ask in significant_asks:
+                    if next_ask['price'] > ask['price'] * 1.01:  # At least 1% higher
+                        next_resistance = next_ask['price']
+                        break
+                
+                if not next_resistance:
+                    next_resistance = ask['price'] * 1.03  # Default 3% target
+                
+                # Set stop loss below current support
+                stop_loss = mid_price * 0.98  # 2% below current price
+                if significant_bids:
+                    stop_loss = max(stop_loss, significant_bids[0]['price'] * 0.995)
+                
+                risk_reward = (next_resistance - entry_price) / (entry_price - stop_loss)
+                
+                if risk_reward >= 1.5:  # Minimum 1.5:1 R/R
+                    confidence = "HIGH" if ask['quantity'] > ask.get('avg_size', 0) * 15 else "MEDIUM"
+                    
+                    setups.append({
+                        'symbol': symbol,
+                        'setup_type': 'BREAKOUT',
+                        'direction': 'LONG',
+                        'entry_price': entry_price,
+                        'target_price': next_resistance,
+                        'stop_loss': stop_loss,
+                        'risk_reward_ratio': risk_reward,
+                        'confidence': confidence,
+                        'wall_size': ask['quantity'],
+                        'wall_distance_pct': ask['distance_pct'],
+                        'description': f"Break above ${entry_price:.6f if entry_price < 1 else entry_price:.4f if entry_price < 100 else entry_price:.2f} resistance wall"
+                    })
+        
+        # Bearish breakout setups (breaking support walls)
+        for bid in significant_bids[:3]:  # Top 3 support levels
+            if bid['distance_pct'] < 3:  # Within 3% of current price
+                entry_price = bid['price'] * 0.999  # Entry slightly below wall
+                
+                # Find next support for target
+                next_support = None
+                for next_bid in significant_bids:
+                    if next_bid['price'] < bid['price'] * 0.99:  # At least 1% lower
+                        next_support = next_bid['price']
+                        break
+                
+                if not next_support:
+                    next_support = bid['price'] * 0.97  # Default 3% target
+                
+                # Set stop loss above current resistance
+                stop_loss = mid_price * 1.02  # 2% above current price
+                if significant_asks:
+                    stop_loss = min(stop_loss, significant_asks[0]['price'] * 1.005)
+                
+                risk_reward = (entry_price - next_support) / (stop_loss - entry_price)
+                
+                if risk_reward >= 1.5:  # Minimum 1.5:1 R/R
+                    confidence = "HIGH" if bid['quantity'] > bid.get('avg_size', 0) * 15 else "MEDIUM"
+                    
+                    setups.append({
+                        'symbol': symbol,
+                        'setup_type': 'BREAKOUT',
+                        'direction': 'SHORT',
+                        'entry_price': entry_price,
+                        'target_price': next_support,
+                        'stop_loss': stop_loss,
+                        'risk_reward_ratio': risk_reward,
+                        'confidence': confidence,
+                        'wall_size': bid['quantity'],
+                        'wall_distance_pct': bid['distance_pct'],
+                        'description': f"Break below ${entry_price:.6f if entry_price < 1 else entry_price:.4f if entry_price < 100 else entry_price:.2f} support wall"
+                    })
+        
+        return setups
+    
+    def detect_bounce_setups(self, analysis: Dict, symbol: str) -> List[Dict]:
+        """Detect bounce setups from strong support/resistance levels"""
+        setups = []
+        mid_price = analysis['mid_price']
+        significant_bids = analysis.get('significant_bids', [])
+        significant_asks = analysis.get('significant_asks', [])
+        
+        # Bounce from support setups
+        for bid in significant_bids[:2]:  # Top 2 support levels
+            if 0.5 <= bid['distance_pct'] <= 2:  # Between 0.5% and 2% below current price
+                entry_price = bid['price'] * 1.002  # Entry slightly above support
+                
+                # Target nearest resistance
+                target_price = mid_price * 1.015  # Default 1.5% target
+                if significant_asks:
+                    target_price = min(target_price, significant_asks[0]['price'] * 0.995)
+                
+                stop_loss = bid['price'] * 0.995  # Just below support
+                
+                risk_reward = (target_price - entry_price) / (entry_price - stop_loss)
+                
+                if risk_reward >= 2:  # Higher R/R required for bounces
+                    confidence = "HIGH" if bid['quantity'] > bid.get('avg_size', 0) * 20 else "MEDIUM"
+                    
+                    setups.append({
+                        'symbol': symbol,
+                        'setup_type': 'BOUNCE',
+                        'direction': 'LONG',
+                        'entry_price': entry_price,
+                        'target_price': target_price,
+                        'stop_loss': stop_loss,
+                        'risk_reward_ratio': risk_reward,
+                        'confidence': confidence,
+                        'wall_size': bid['quantity'],
+                        'wall_distance_pct': bid['distance_pct'],
+                        'description': f"Bounce from ${bid['price']:.6f if bid['price'] < 1 else bid['price']:.4f if bid['price'] < 100 else bid['price']:.2f} support wall"
+                    })
+        
+        # Bounce from resistance setups (short)
+        for ask in significant_asks[:2]:  # Top 2 resistance levels
+            if 0.5 <= ask['distance_pct'] <= 2:  # Between 0.5% and 2% above current price
+                entry_price = ask['price'] * 0.998  # Entry slightly below resistance
+                
+                # Target nearest support
+                target_price = mid_price * 0.985  # Default 1.5% target
+                if significant_bids:
+                    target_price = max(target_price, significant_bids[0]['price'] * 1.005)
+                
+                stop_loss = ask['price'] * 1.005  # Just above resistance
+                
+                risk_reward = (entry_price - target_price) / (stop_loss - entry_price)
+                
+                if risk_reward >= 2:  # Higher R/R required for bounces
+                    confidence = "HIGH" if ask['quantity'] > ask.get('avg_size', 0) * 20 else "MEDIUM"
+                    
+                    setups.append({
+                        'symbol': symbol,
+                        'setup_type': 'BOUNCE',
+                        'direction': 'SHORT',
+                        'entry_price': entry_price,
+                        'target_price': target_price,
+                        'stop_loss': stop_loss,
+                        'risk_reward_ratio': risk_reward,
+                        'confidence': confidence,
+                        'wall_size': ask['quantity'],
+                        'wall_distance_pct': ask['distance_pct'],
+                        'description': f"Bounce from ${ask['price']:.6f if ask['price'] < 1 else ask['price']:.4f if ask['price'] < 100 else ask['price']:.2f} resistance wall"
+                    })
+        
+        return setups
+    
+    def generate_setup_alert(self, setup: Dict) -> str:
+        """Generate professional setup alert"""
+        symbol = setup['symbol']
+        setup_type = setup['setup_type']
+        direction = setup['direction']
+        entry = setup['entry_price']
+        target = setup['target_price']
+        stop = setup['stop_loss']
+        rr = setup['risk_reward_ratio']
+        confidence = setup['confidence']
+        
+        # Choose emoji based on setup type and direction
+        if setup_type == "BREAKOUT":
+            emoji = "🚀" if direction == "LONG" else "📉"
+        else:  # BOUNCE
+            emoji = "📈" if direction == "LONG" else "📊"
+            
+        alert = f"{emoji} <b>{setup_type} SETUP - {symbol}</b>\n\n"
+        alert += f"📍 Direction: <b>{direction}</b>\n"
+        alert += f"🎯 Entry: ${entry:.6f if entry < 1 else entry:.4f if entry < 100 else entry:.2f}\n"
+        alert += f"🏆 Target: ${target:.6f if target < 1 else target:.4f if target < 100 else target:.2f}\n"
+        alert += f"🛡️ Stop Loss: ${stop:.6f if stop < 1 else stop:.4f if stop < 100 else stop:.2f}\n"
+        alert += f"⚡ Risk/Reward: <b>1:{rr:.1f}</b>\n"
+        alert += f"🎯 Confidence: <b>{confidence}</b>\n\n"
+        
+        alert += f"📋 <i>{setup['description']}</i>\n\n"
+        
+        # Add setup-specific guidance
+        if setup_type == "BREAKOUT":
+            alert += "🔥 <i>Wait for clear break with volume</i>\n"
+            alert += "⏰ <i>Monitor for follow-through</i>"
+        else:  # BOUNCE
+            alert += "⚖️ <i>Wait for bounce confirmation</i>\n"
+            alert += "📏 <i>Tight risk management required</i>"
+            
+        return alert
+    
+    def store_setup(self, setup: Dict):
+        """Store setup in database"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            cursor.execute('''
+                INSERT INTO orderbook_setups (
+                    symbol, setup_type, direction, entry_price, target_price,
+                    stop_loss, risk_reward_ratio, confidence, wall_size, wall_distance_pct, setup_sent
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                setup['symbol'], setup['setup_type'], setup['direction'],
+                setup['entry_price'], setup['target_price'], setup['stop_loss'],
+                setup['risk_reward_ratio'], setup['confidence'],
+                setup['wall_size'], setup['wall_distance_pct'], 1
+            ))
+            
+            conn.commit()
+            conn.close()
+            logger.info(f"Setup stored for {setup['symbol']}")
+            
+        except Exception as e:
+            logger.error(f"Failed to store setup: {e}")
+
+
 class OrderBookAnalyzer:
     """Order book analysis component"""
 
@@ -493,7 +822,7 @@ class OrderBookAnalyzer:
         try:
             url = "https://api.binance.com/api/v3/depth"
             api_symbol = symbol.replace('/', '')
-            params = {"symbol": api_symbol, "limit": 1000}
+            params = {"symbol": api_symbol, "limit": 2000}
             response = requests.get(url, params=params, timeout=10)
             data = response.json()
             if not data or 'bids' not in data or 'asks' not in data:
@@ -831,10 +1160,12 @@ class EnhancedTelegramBot:
         self.orderbook_analyzer = OrderBookAnalyzer()
         self.dominance_analyzer = USDTDominanceAnalyzer()
         self.volume_analyzer = VolumeSurgeAnalyzer()
+        self.setup_analyzer = OrderBookSetupAnalyzer()
         self.last_macd_hist = None
         self.last_vwap_price = None
         self.dominance_running = False
         self.volume_surge_running = False
+        self.setup_running = False
         self.last_dominance_sentiment = None
 
     def get_ohlcv(self, symbol, timeframe='1h', limit=50):
@@ -1264,6 +1595,67 @@ class EnhancedTelegramBot:
             logger.error(f"Error getting market sentiment: {e}")
         return None
 
+    async def setup_monitor(self):
+        """Monitor for professional trading setups based on order book"""
+        while self.setup_running:
+            try:
+                logger.info("Starting setup scanning cycle...")
+                setup_count = 0
+                
+                for symbol in self.symbols:
+                    try:
+                        # Get current price and order book
+                        ticker = await asyncio.get_event_loop().run_in_executor(
+                            None, lambda: self.exchange.fetch_ticker(symbol)
+                        )
+                        
+                        orderbook = await asyncio.get_event_loop().run_in_executor(
+                            None, lambda: self.exchange.fetch_order_book(symbol, limit=2000)
+                        )
+                        
+                        current_price = ticker['last']
+                        
+                        if not orderbook or not orderbook.get('bids') or not orderbook.get('asks'):
+                            continue
+                            
+                        # Detect breakout setups
+                        breakout_setups = self.setup_analyzer.detect_breakout_setups(
+                            orderbook, current_price, symbol
+                        )
+                        
+                        # Detect bounce setups  
+                        bounce_setups = self.setup_analyzer.detect_bounce_setups(
+                            orderbook, current_price, symbol
+                        )
+                        
+                        # Process all setups
+                        all_setups = breakout_setups + bounce_setups
+                        
+                        for setup in all_setups:
+                            # Generate and send alert
+                            alert = self.setup_analyzer.generate_setup_alert(setup)
+                            await self.send_alert(alert)
+                            
+                            # Store setup in database
+                            self.setup_analyzer.store_setup(setup)
+                            setup_count += 1
+                            
+                            logger.info(f"Setup detected: {setup['symbol']} {setup['setup_type']} {setup['direction']}")
+                            
+                    except Exception as e:
+                        logger.error(f"Setup analysis error for {symbol}: {e}")
+                        continue
+                        
+                if setup_count > 0:
+                    logger.info(f"Setup monitoring completed: {setup_count} setups detected")
+                else:
+                    logger.info("Setup monitoring completed: No setups detected")
+                    
+            except Exception as e:
+                logger.error(f"Setup monitoring error: {e}")
+                
+            await asyncio.sleep(3600)  # Check every hour
+
     async def start_monitoring(self):
         """Start both breakout and order book monitoring"""
         if self.running:
@@ -1274,6 +1666,7 @@ class EnhancedTelegramBot:
         self.orderbook_running = True
         self.dominance_running = True
         self.volume_surge_running = True
+        self.setup_running = True
         
         logger.info("Starting enhanced monitoring...")
         
@@ -1293,17 +1686,22 @@ class EnhancedTelegramBot:
         volume_task = asyncio.create_task(self.volume_surge_monitor())
         logger.info("Volume surge monitoring started")
         
+        # Start setup monitoring task
+        setup_task = asyncio.create_task(self.setup_monitor())
+        logger.info("Setup monitoring started")
+        
         # Send startup notification
         await self.send_alert(
             "🤖 <b>Enhanced Crypto Bot Started</b>\n\n"
             "🚀 Breakout monitoring: ACTIVE\n"
             "📊 Order book analysis: ACTIVE\n"
             "🎯 USDT.D sentiment: ACTIVE\n"
-            "📈 Volume surge alerts: ACTIVE\n\n"
+            "📈 Volume surge alerts: ACTIVE\n"
+            "⚡ Setup detection: ACTIVE\n\n"
             f"Monitoring {len(self.symbols)} symbols"
         )
         
-        return breakout_task, orderbook_task, dominance_task, volume_task
+        return breakout_task, orderbook_task, dominance_task, volume_task, setup_task
 
     async def breakout_monitor(self):
         """Monitor breakouts at candle close"""
@@ -1570,6 +1968,83 @@ async def volume_command(update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"❌ Error scanning volumes: {str(e)[:100]}", parse_mode='HTML')
 
+async def setups_command(update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /setups command - check for current trading setups"""
+    bot_instance = context.bot_data.get('bot_instance')
+    if not bot_instance:
+        await update.message.reply_text("❌ Bot not initialized", parse_mode='HTML')
+        return
+        
+    await update.message.reply_text("⚡ Scanning for trading setups...", parse_mode='HTML')
+    
+    try:
+        setups_found = []
+        
+        for symbol in bot_instance.symbols:
+            try:
+                # Get current price and order book
+                ticker = bot_instance.exchange.fetch_ticker(symbol)
+                orderbook = bot_instance.exchange.fetch_order_book(symbol, limit=2000)
+                current_price = ticker['last']
+                
+                if not orderbook or not orderbook.get('bids') or not orderbook.get('asks'):
+                    continue
+                    
+                # Detect breakout setups
+                breakout_setups = bot_instance.setup_analyzer.detect_breakout_setups(
+                    orderbook, current_price, symbol
+                )
+                
+                # Detect bounce setups  
+                bounce_setups = bot_instance.setup_analyzer.detect_bounce_setups(
+                    orderbook, current_price, symbol
+                )
+                
+                # Combine all setups
+                all_setups = breakout_setups + bounce_setups
+                setups_found.extend(all_setups)
+                
+            except Exception as e:
+                logger.error(f"Error checking setups for {symbol}: {e}")
+                
+        if setups_found:
+            # Sort by confidence and risk/reward ratio
+            setups_found.sort(key=lambda x: (x['confidence'] == 'HIGH', x['risk_reward_ratio']), reverse=True)
+            
+            if len(setups_found) == 1:
+                # Single setup - send detailed alert
+                setup = setups_found[0]
+                alert = bot_instance.setup_analyzer.generate_setup_alert(setup)
+                await update.message.reply_text(alert, parse_mode='HTML')
+            else:
+                # Multiple setups - send summary
+                message = "⚡ <b>Trading Setups Found</b>\n\n"
+                
+                for i, setup in enumerate(setups_found[:8]):  # Show top 8
+                    setup_emoji = "🚀" if setup['setup_type'] == 'BREAKOUT' else "🎯"
+                    direction_emoji = "🟢" if setup['direction'] == 'LONG' else "🔴"
+                    confidence_emoji = "🔥" if setup['confidence'] == 'HIGH' else "⭐"
+                    
+                    # Format price with appropriate decimals
+                    price = setup['entry_price']
+                    decimals = 6 if price < 1 else 4 if price < 100 else 2
+                    
+                    message += f"{setup_emoji}{direction_emoji} <b>{setup['symbol']}</b> {setup['setup_type']}\n"
+                    message += f"   Entry: ${price:.{decimals}f} | RR: {setup['risk_reward_ratio']:.1f} {confidence_emoji}\n\n"
+                    
+                if len(setups_found) > 8:
+                    message += f"<i>...and {len(setups_found) - 8} more setups</i>\n\n"
+                    
+                message += "💡 Use /setups to scan again or check individual symbols"
+                await update.message.reply_text(message, parse_mode='HTML')
+                
+        else:
+            message = "⚡ <b>Setup Scan Complete</b>\n\n📊 No high-quality trading setups found at current market conditions."
+            await update.message.reply_text(message, parse_mode='HTML')
+            
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error scanning setups: {str(e)[:100]}", parse_mode='HTML')
+
 async def stop_command(update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /stop command"""
     bot_instance = context.bot_data.get('bot_instance')
@@ -1599,6 +2074,7 @@ def main():
     application.add_handler(CommandHandler("analyze", analyze_command))
     application.add_handler(CommandHandler("dominance", dominance_command))
     application.add_handler(CommandHandler("volume", volume_command))
+    application.add_handler(CommandHandler("setups", setups_command))
     application.add_handler(CommandHandler("stop", stop_command))
 
     application.bot_data['bot_instance'] = bot
