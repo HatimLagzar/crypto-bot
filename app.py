@@ -284,7 +284,10 @@ class OrderBookAnalyzer:
     def generate_report(self, analysis: Dict) -> str:
         """Generate order book report"""
         report = f"📊 <b>Order Book Analysis</b>\n"
-        report += f"💰 Mid Price: ${analysis['mid_price']:.2f}\n"
+        # Use more decimals for low-price coins
+        mid_price = analysis['mid_price']
+        decimals = 6 if mid_price < 1 else 4 if mid_price < 100 else 2
+        report += f"💰 Mid Price: ${mid_price:.{decimals}f}\n"
         report += f"📈 Spread: {analysis['spread_bps']:.2f} bps\n\n"
         
         # Market pressure
@@ -303,12 +306,16 @@ class OrderBookAnalyzer:
         if significant_bids:
             report += f"\n🟢 <b>Key Support Levels:</b>\n"
             for bid in significant_bids[:3]:  # Show top 3
-                report += f"  ${bid['price']:.2f} ({bid['distance_pct']:.2f}% below)\n"
+                # Use more decimals for low-price coins
+                decimals = 6 if bid['price'] < 1 else 4 if bid['price'] < 100 else 2
+                report += f"  ${bid['price']:.{decimals}f} ({bid['distance_pct']:.2f}% below)\n"
                 
         if significant_asks:
             report += f"\n🔴 <b>Key Resistance Levels:</b>\n"
             for ask in significant_asks[:3]:  # Show top 3
-                report += f"  ${ask['price']:.2f} ({ask['distance_pct']:.2f}% above)\n"
+                # Use more decimals for low-price coins
+                decimals = 6 if ask['price'] < 1 else 4 if ask['price'] < 100 else 2
+                report += f"  ${ask['price']:.{decimals}f} ({ask['distance_pct']:.2f}% above)\n"
         
         # Wall counts
         if analysis.get('large_bid_walls', 0) > 0 or analysis.get('large_ask_walls', 0) > 0:
