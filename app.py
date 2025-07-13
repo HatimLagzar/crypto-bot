@@ -538,6 +538,12 @@ class EnhancedTelegramBot:
                 
                 if signal:
                     timestamp = datetime.now().strftime("%H:%M:%S")
+                    # Calculate Stop Loss (SL) and Take Profit (TP)
+                    sl = level
+                    if signal == 'BULLISH':
+                        tp = price + (price - level)
+                    else:
+                        tp = price - (level - price)
                     direction_emoji = "🚀" if signal == "BULLISH" else "📉"
                     
                     message = f"""
@@ -546,6 +552,8 @@ class EnhancedTelegramBot:
 <b>Symbol:</b> {symbol}
 <b>Price:</b> ${price:.4f}
 <b>Level:</b> ${level:.4f}
+<b>SL:</b> ${sl:.4f}
+<b>TP:</b> ${tp:.4f}
 <b>Time:</b> {timestamp}
 
 Volume spike detected! 📊
