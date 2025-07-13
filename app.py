@@ -154,7 +154,7 @@ class OrderBookAnalyzer:
         significant_asks = []
         
         for price, qty in bids:
-            if qty >= avg_bid_size * self.thresholds['large_wall_multiplier']:
+            if qty >= avg_bid_size * self.thresholds['huge_wall_multiplier']:
                 distance_pct = ((mid_price - price) / mid_price) * 100
                 significant_bids.append({
                     'price': price,
@@ -164,7 +164,7 @@ class OrderBookAnalyzer:
                 })
         
         for price, qty in asks:
-            if qty >= avg_ask_size * self.thresholds['large_wall_multiplier']:
+            if qty >= avg_ask_size * self.thresholds['huge_wall_multiplier']:
                 distance_pct = ((price - mid_price) / mid_price) * 100
                 significant_asks.append({
                     'price': price,
