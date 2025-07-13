@@ -538,14 +538,19 @@ class EnhancedTelegramBot:
                 
                 if signal:
                     timestamp = datetime.now().strftime("%H:%M:%S")
-                    # Calculate Stop Loss (SL) and Take Profit (TP)
-                    sl = level
+                    # Calculate Stop Loss (SL) with 1% offset from breakout level
                     if signal == 'BULLISH':
-                        tp = price + (price - level)
+                        sl = level * (1 - 0.01)   # 1% below breakout level
                     else:
-                        tp = price - (level - price)
+                        sl = level * (1 + 0.01)   # 1% above breakdown level
+
+                    # Calculate Take Profit (TP) at 2:1 RR
+                    if signal == 'BULLISH':
+                        tp = price + (price - sl) * 2
+                    else:
+                        tp = price - (sl - price) * 2
                     direction_emoji = "🚀" if signal == "BULLISH" else "📉"
-                    
+
                     message = f"""
 {direction_emoji} <b>{signal} BREAKOUT</b>
                     
@@ -558,7 +563,7 @@ class EnhancedTelegramBot:
 
 Volume spike detected! 📊
                     """
-                    
+
                     await self.send_alert(message)
                     alerts_sent.append(f"{symbol} {signal}")
 
