@@ -210,36 +210,65 @@ class OrderBookAnalyzer:
         else:
             return "NEUTRAL"
 
-    def calculate_liquidity_score(self, analysis: Dict) -> float:
-        """Calculate overall liquidity health score (0-100)"""
+    def calculate_liquidity_score(self, analysis: Dict, symbol: str = 'BTC/USDT') -> float:
+        """Calculate asset-specific liquidity health score (0-100)"""
         score = 50  # Start with neutral
         
-        # Spread component (30% weight)
-        spread_bps = analysis.get('spread_bps', 0)
-        if spread_bps < 2:
-            score += 20
-        elif spread_bps < 5:
-            score += 10
-        elif spread_bps > 15:
-            score -= 20
-        elif spread_bps > 10:
-            score -= 10
+        # Asset-specific thresholds
+        mid_price = analysis.get('mid_price', 0)
+        
+        # Determine asset tier for different expectations
+        if symbol in ['BTC/USDT', 'ETH/USDT']:
+            tier = 'major'  # Highest liquidity expectations
+        elif symbol in ['BNB/USDT', 'SOL/USDT', 'XRP/USDT', 'ADA/USDT', 'DOGE/USDT']:
+            tier = 'large_alt'  # High liquidity expectations
+        elif mid_price > 100:
+            tier = 'mid_cap'  # Medium liquidity expectations
+        else:
+            tier = 'small_cap'  # Lower liquidity expectations
             
-        # Depth component (40% weight)
+        # Dynamic spread thresholds based on asset tier
+        spread_bps = analysis.get('spread_bps', 0)
+        if tier == 'major':
+            if spread_bps < 1: score += 25
+            elif spread_bps < 3: score += 15
+            elif spread_bps < 8: score += 5
+            elif spread_bps > 20: score -= 25
+            elif spread_bps > 10: score -= 15
+        elif tier == 'large_alt':
+            if spread_bps < 2: score += 20
+            elif spread_bps < 5: score += 10
+            elif spread_bps > 25: score -= 20
+            elif spread_bps > 15: score -= 10
+        else:  # mid_cap and small_cap
+            if spread_bps < 5: score += 15
+            elif spread_bps < 10: score += 5
+            elif spread_bps > 50: score -= 20
+            elif spread_bps > 30: score -= 10
+            
+        # Dynamic depth thresholds based on price and tier
         bid_depth = analysis.get('bid_depth_1pct', 0)
         ask_depth = analysis.get('ask_depth_1pct', 0)
         total_depth = bid_depth + ask_depth
         
-        if total_depth > 1000000:  # High liquidity
-            score += 25
-        elif total_depth > 500000:  # Good liquidity
-            score += 15
-        elif total_depth > 100000:  # Moderate liquidity
-            score += 5
-        elif total_depth < 10000:  # Low liquidity
-            score -= 20
+        # Convert to USD value for consistent comparison
+        total_depth_usd = total_depth * mid_price if mid_price > 0 else total_depth
+        
+        if tier == 'major':
+            if total_depth_usd > 5000000: score += 25
+            elif total_depth_usd > 2000000: score += 15
+            elif total_depth_usd > 500000: score += 5
+            elif total_depth_usd < 100000: score -= 25
+        elif tier == 'large_alt':
+            if total_depth_usd > 2000000: score += 20
+            elif total_depth_usd > 500000: score += 10
+            elif total_depth_usd < 50000: score -= 20
+        else:  # mid_cap and small_cap
+            if total_depth_usd > 500000: score += 15
+            elif total_depth_usd > 100000: score += 5
+            elif total_depth_usd < 10000: score -= 15
             
-        # Balance component (20% weight)
+        # Balance component (consistent across tiers)
         imbalance = abs(analysis.get('immediate_imbalance', 0))
         if imbalance < 0.1:
             score += 10
@@ -248,12 +277,14 @@ class OrderBookAnalyzer:
         elif imbalance > 0.6:
             score -= 15
             
-        # Support/resistance levels (10% weight)
+        # Support/resistance levels (adjusted by tier)
         total_walls = analysis.get('large_bid_walls', 0) + analysis.get('large_ask_walls', 0)
-        if total_walls > 3:
-            score += 5
-        elif total_walls == 0:
-            score -= 5
+        if tier == 'major':
+            if total_walls > 5: score += 5
+            elif total_walls == 0: score -= 10
+        else:
+            if total_walls > 2: score += 5
+            elif total_walls == 0: score -= 5
             
         return max(0, min(100, score))
 
@@ -277,7 +308,7 @@ class OrderBookAnalyzer:
         analysis.update(self.detect_significant_levels(bids, asks, mid_price))
         # ... weighted prices, skew, sentiment, liquidity score ...
         analysis['market_sentiment'] = self.classify_market_sentiment(analysis)
-        analysis['liquidity_score'] = self.calculate_liquidity_score(analysis)
+        analysis['liquidity_score'] = self.calculate_liquidity_score(analysis, symbol)
 
         return analysis
 
@@ -420,13 +451,131 @@ class EnhancedTelegramBot:
         
         return df
 
-    def check_breakout(self, df):
+    def detect_price_action_patterns(self, df):
+        """Detect significant price action patterns"""
+        if len(df) < 3:
+            return []
+            
+        current = df.iloc[-1]
+        previous = df.iloc[-2]
+        prev2 = df.iloc[-3]
+        
+        patterns = []
+        
+        # Calculate candle properties
+        current_body = abs(current['close'] - current['open'])
+        current_range = current['high'] - current['low']
+        current_upper_shadow = current['high'] - max(current['open'], current['close'])
+        current_lower_shadow = min(current['open'], current['close']) - current['low']
+        
+        previous_body = abs(previous['close'] - previous['open'])
+        
+        # Doji pattern - small body relative to range
+        if current_body < (current_range * 0.1) and current_range > 0:
+            patterns.append("Doji")
+            
+        # Hammer pattern - small upper shadow, long lower shadow, small body
+        if (current_lower_shadow > current_body * 2 and 
+            current_upper_shadow < current_body * 0.5 and
+            current_range > 0):
+            patterns.append("Hammer")
+            
+        # Shooting star - small lower shadow, long upper shadow, small body  
+        if (current_upper_shadow > current_body * 2 and
+            current_lower_shadow < current_body * 0.5 and
+            current_range > 0):
+            patterns.append("Shooting Star")
+            
+        # Bullish engulfing - current green candle completely engulfs previous red candle
+        if (current['close'] > current['open'] and  # Current is green
+            previous['close'] < previous['open'] and  # Previous is red
+            current['open'] < previous['close'] and  # Current opens below previous close
+            current['close'] > previous['open']):    # Current closes above previous open
+            patterns.append("Bullish Engulfing")
+            
+        # Bearish engulfing - current red candle completely engulfs previous green candle
+        if (current['close'] < current['open'] and  # Current is red
+            previous['close'] > previous['open'] and  # Previous is green
+            current['open'] > previous['close'] and  # Current opens above previous close
+            current['close'] < previous['open']):    # Current closes below previous open
+            patterns.append("Bearish Engulfing")
+            
+        # Three white soldiers - three consecutive green candles with higher closes
+        if (len(df) >= 3 and
+            current['close'] > current['open'] and
+            previous['close'] > previous['open'] and  
+            prev2['close'] > prev2['open'] and
+            current['close'] > previous['close'] > prev2['close']):
+            patterns.append("Three White Soldiers")
+            
+        # Three black crows - three consecutive red candles with lower closes
+        if (len(df) >= 3 and
+            current['close'] < current['open'] and
+            previous['close'] < previous['open'] and
+            prev2['close'] < prev2['open'] and  
+            current['close'] < previous['close'] < prev2['close']):
+            patterns.append("Three Black Crows")
+            
+        return patterns
+
+    def get_higher_timeframe_trend(self, symbol, current_timeframe='1h'):
+        """Get trend direction from higher timeframe for confirmation"""
+        try:
+            # Map to higher timeframes
+            tf_map = {'1h': '4h', '4h': '1d', '1d': '1w'}
+            higher_tf = tf_map.get(current_timeframe, '4h')
+            
+            # Get higher timeframe data
+            higher_df = self.get_ohlcv(symbol, timeframe=higher_tf, limit=50)
+            if higher_df is None or len(higher_df) < 20:
+                return None
+                
+            # Calculate trend indicators on higher timeframe
+            higher_df = self.calculate_levels(higher_df)
+            current_higher = higher_df.iloc[-1]
+            
+            # Determine trend based on multiple factors
+            trend_score = 0
+            
+            # EMA vs SMA comparison
+            if current_higher['ema_20'] > current_higher['sma_50']:
+                trend_score += 1
+            else:
+                trend_score -= 1
+                
+            # Price vs moving averages
+            if current_higher['close'] > current_higher['ema_20']:
+                trend_score += 1
+            else:
+                trend_score -= 1
+                
+            # Recent price action (last 5 candles trend)
+            if len(higher_df) >= 5:
+                recent_closes = higher_df['close'].tail(5)
+                if recent_closes.iloc[-1] > recent_closes.iloc[0]:  # Overall rising
+                    trend_score += 1
+                else:
+                    trend_score -= 1
+            
+            # Classify trend
+            if trend_score >= 2:
+                return "bullish"
+            elif trend_score <= -2:
+                return "bearish"
+            else:
+                return "neutral"
+                
+        except Exception as e:
+            logger.error(f"Error getting higher timeframe trend for {symbol}: {e}")
+            return None
+
+    def check_breakout(self, df, symbol='BTC/USDT'):
         """Check for breakout conditions"""
         if len(df) < self.lookback:
             return None, None, None
             
         current = df.iloc[-1]
-        previous = df.iloc[-2]
+        previous = df.iloc[-2] if len(df) > 1 else current
         
         # Calculate recent highs/lows (excluding current candle to avoid self-comparison)
         recent_data = df.iloc[:-1]  # Exclude current candle
@@ -446,62 +595,87 @@ class EnhancedTelegramBot:
             current['volume_ratio'] > self.volume_threshold
         )
         
-        # Bollinger Band breakouts (additional confirmation)
-        bb_resistance_break = (
-            current['close'] > current['bb_upper'] and
-            previous['close'] <= previous['bb_upper'] and
-            current['volume_ratio'] > self.volume_threshold
+        # RSI filtering - avoid breakouts in extreme conditions
+        rsi_allows_bullish = current['rsi'] < 70  # Not overbought
+        rsi_allows_bearish = current['rsi'] > 30  # Not oversold
+        
+        # Price action confirmation - ensure strong candle close
+        bullish_price_action = (
+            current['close'] > current['open'] and  # Green candle
+            (current['close'] - current['open']) / current['open'] > 0.01  # At least 1% move
         )
         
-        bb_support_break = (
-            current['close'] < current['bb_lower'] and
-            previous['close'] >= previous['bb_lower'] and
-            current['volume_ratio'] > self.volume_threshold
+        bearish_price_action = (
+            current['close'] < current['open'] and  # Red candle  
+            (current['open'] - current['close']) / current['open'] > 0.01  # At least 1% move
         )
         
-        # Check for moving average crossovers (trend changes)
-        ma_bullish = (
-            current['ema_20'] > current['sma_50'] and
-            previous['ema_20'] <= previous['sma_50'] and
-            current['volume_ratio'] > 1.2
+        # Enhanced volume confirmation
+        strong_volume = current['volume_ratio'] > 2.0
+        moderate_volume = current['volume_ratio'] > self.volume_threshold
+        
+        # Bollinger Band confirmation (only as secondary signal)
+        bb_confirms_bullish = current['close'] > current['bb_upper']
+        bb_confirms_bearish = current['close'] < current['bb_lower']
+        
+        # Price action pattern analysis
+        patterns = self.detect_price_action_patterns(df)
+        bullish_patterns = [p for p in patterns if p in ["Hammer", "Bullish Engulfing", "Three White Soldiers"]]
+        bearish_patterns = [p for p in patterns if p in ["Shooting Star", "Bearish Engulfing", "Three Black Crows"]]
+        
+        # Multi-timeframe trend confirmation
+        higher_tf_trend = self.get_higher_timeframe_trend(symbol)
+        trend_aligns_bullish = higher_tf_trend in ["bullish", "neutral"]  # Allow neutral for sideways breakouts
+        trend_aligns_bearish = higher_tf_trend in ["bearish", "neutral"]
+        
+        # Main breakout logic - focus on price structure with multi-timeframe confirmation
+        bullish_breakout = (
+            resistance_break and 
+            rsi_allows_bullish and
+            bullish_price_action and
+            moderate_volume and
+            trend_aligns_bullish  # Higher timeframe must align or be neutral
         )
         
-        ma_bearish = (
-            current['ema_20'] < current['sma_50'] and
-            previous['ema_20'] >= previous['sma_50'] and
-            current['volume_ratio'] > 1.2
+        bearish_breakout = (
+            support_break and
+            rsi_allows_bearish and  
+            bearish_price_action and
+            moderate_volume and
+            trend_aligns_bearish  # Higher timeframe must align or be neutral
         )
         
-        # Determine direction and strength
-        bullish_signals = []
-        bearish_signals = []
-        
-        if resistance_break:
-            bullish_signals.append("High Break")
-        if bb_resistance_break:
-            bullish_signals.append("BB Upper")
-        if ma_bullish:
-            bullish_signals.append("MA Cross")
+        # Return results with proper context
+        if bullish_breakout:
+            strength = "STRONG" if strong_volume and (bb_confirms_bullish or bullish_patterns) else "MODERATE"
+            confirmations = []
+            if bb_confirms_bullish:
+                confirmations.append("BB+")
+            if strong_volume:
+                confirmations.append("Vol+")
+            if bullish_patterns:
+                confirmations.extend(bullish_patterns)
+            if higher_tf_trend == "bullish":
+                confirmations.append("4H↗")
             
-        if support_break:
-            bearish_signals.append("Low Break")
-        if bb_support_break:
-            bearish_signals.append("BB Lower")
-        if ma_bearish:
-            bearish_signals.append("MA Cross")
-        
-        # Return bullish breakout
-        if bullish_signals:
-            strength = "STRONG" if current['volume_ratio'] > 2.0 else "MODERATE"
-            signal_text = "+".join(bullish_signals)
-            analysis = f"{signal_text} | RSI: {current['rsi']:.1f} | Vol: {current['volume_ratio']:.1f}x | High: ${recent_high:.4f}"
+            confirmation_text = f" ({'+'.join(confirmations)})" if confirmations else ""
+            analysis = f"High Break{confirmation_text} | RSI: {current['rsi']:.1f} | Vol: {current['volume_ratio']:.1f}x | Broke: ${recent_high:.4f}"
             return "bullish", strength, analysis
             
-        # Return bearish breakout
-        elif bearish_signals:
-            strength = "STRONG" if current['volume_ratio'] > 2.0 else "MODERATE"
-            signal_text = "+".join(bearish_signals)
-            analysis = f"{signal_text} | RSI: {current['rsi']:.1f} | Vol: {current['volume_ratio']:.1f}x | Low: ${recent_low:.4f}"
+        elif bearish_breakout:
+            strength = "STRONG" if strong_volume and (bb_confirms_bearish or bearish_patterns) else "MODERATE" 
+            confirmations = []
+            if bb_confirms_bearish:
+                confirmations.append("BB+")
+            if strong_volume:
+                confirmations.append("Vol+")
+            if bearish_patterns:
+                confirmations.extend(bearish_patterns)
+            if higher_tf_trend == "bearish":
+                confirmations.append("4H↘")
+                
+            confirmation_text = f" ({'+'.join(confirmations)})" if confirmations else ""
+            analysis = f"Low Break{confirmation_text} | RSI: {current['rsi']:.1f} | Vol: {current['volume_ratio']:.1f}x | Broke: ${recent_low:.4f}"
             return "bearish", strength, analysis
             
         return None, None, None
@@ -528,7 +702,7 @@ class EnhancedTelegramBot:
                     continue
                 
                 df = self.calculate_levels(df)
-                direction, strength, analysis = self.check_breakout(df)
+                direction, strength, analysis = self.check_breakout(df, symbol)
                 
                 if direction and strength:
                     message = f"🚀 <b>{symbol} {direction.upper()} BREAKOUT</b>\n"
