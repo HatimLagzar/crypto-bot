@@ -714,12 +714,29 @@ async def analyze_command(update, context: ContextTypes.DEFAULT_TYPE):
                     spread = analysis.get('spread_bps', 0)
                     imbalance = analysis.get('immediate_imbalance', 0)
                     
+                    # Get key levels
+                    significant_bids = analysis.get('significant_bids', [])
+                    significant_asks = analysis.get('significant_asks', [])
+                    
                     # Use emojis for quick visual scanning
                     sentiment_emoji = "🟢" if "BULLISH" in sentiment else "🔴" if "BEARISH" in sentiment else "⚪"
+                    
+                    # Format support/resistance levels
+                    support_text = ""
+                    resistance_text = ""
+                    
+                    if significant_bids:
+                        closest_support = significant_bids[0]  # Closest to current price
+                        support_text = f" | 🟢${closest_support['price']:.{decimals}f}({closest_support['distance_pct']:.1f}%)"
+                    
+                    if significant_asks:
+                        closest_resistance = significant_asks[0]  # Closest to current price
+                        resistance_text = f" | 🔴${closest_resistance['price']:.{decimals}f}({closest_resistance['distance_pct']:.1f}%)"
                     
                     results.append(
                         f"{sentiment_emoji} <b>{symbol}</b>: ${mid_price:.{decimals}f} | "
                         f"L:{liquidity:.0f} | S:{spread:.1f}bps | I:{imbalance:.0%}"
+                        f"{support_text}{resistance_text}"
                     )
                 else:
                     results.append(f"❌ <b>{symbol}</b>: Failed to fetch data")
@@ -732,7 +749,7 @@ async def analyze_command(update, context: ContextTypes.DEFAULT_TYPE):
             chunk = results[i:i+chunk_size]
             header = f"📊 <b>Order Book Analysis ({i+1}-{min(i+chunk_size, len(results))} of {len(results)})</b>\n\n"
             message = header + "\n".join(chunk)
-            message += "\n\n<i>L=Liquidity, S=Spread, I=Imbalance</i>"
+            message += "\n\n<i>L=Liquidity, S=Spread, I=Imbalance, 🟢=Support, 🔴=Resistance</i>"
             await update.message.reply_text(message, parse_mode='HTML')
         
         return
