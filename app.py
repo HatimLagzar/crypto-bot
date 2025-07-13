@@ -1176,7 +1176,7 @@ class EnhancedTelegramBot:
             await asyncio.sleep(1800)  # 30 minutes
 
     async def dominance_monitor(self):
-        """Monitor USDT dominance for sentiment shifts every 2 hours"""
+        """Monitor USDT dominance for sentiment shifts every hour"""
         while self.dominance_running:
             try:
                 logger.info("Analyzing USDT dominance for market sentiment...")
@@ -1210,7 +1210,7 @@ class EnhancedTelegramBot:
             except Exception as e:
                 logger.error(f"Dominance monitoring error: {e}")
                 
-            await asyncio.sleep(7200)  # 2 hours
+            await asyncio.sleep(3600)  # 1 hour
 
     async def volume_surge_monitor(self):
         """Monitor all symbols for volume surges every 30 minutes"""
@@ -1387,7 +1387,7 @@ async def symbols_command(update, context: ContextTypes.DEFAULT_TYPE):
         f"<b>Monitored Symbols ({len(symbols)}):</b>\n{symbol_list}\n\n"
         f"<b>Additional Monitoring:</b>\n"
         f"• Order Book: BTC/USDT (every 30min)\n"
-        f"• USDT.D Sentiment: Global (every 2h)\n"
+        f"• USDT.D Sentiment: Global (every 1h)\n"
         f"• Volume Surges: All symbols (every 30min)",
         parse_mode='HTML'
     )
