@@ -428,20 +428,38 @@ class EnhancedTelegramBot:
         current = df.iloc[-1]
         previous = df.iloc[-2]
         
-        # Check for price breakouts
+        # Calculate recent highs/lows (excluding current candle to avoid self-comparison)
+        recent_data = df.iloc[:-1]  # Exclude current candle
+        recent_high = recent_data['high'].rolling(window=self.lookback).max().iloc[-1]
+        recent_low = recent_data['low'].rolling(window=self.lookback).min().iloc[-1]
+        
+        # Check for price breakouts above recent highs/lows
         resistance_break = (
+            current['close'] > recent_high and
+            current['high'] > recent_high and
+            current['volume_ratio'] > self.volume_threshold
+        )
+        
+        support_break = (
+            current['close'] < recent_low and
+            current['low'] < recent_low and
+            current['volume_ratio'] > self.volume_threshold
+        )
+        
+        # Bollinger Band breakouts (additional confirmation)
+        bb_resistance_break = (
             current['close'] > current['bb_upper'] and
             previous['close'] <= previous['bb_upper'] and
             current['volume_ratio'] > self.volume_threshold
         )
         
-        support_break = (
+        bb_support_break = (
             current['close'] < current['bb_lower'] and
             previous['close'] >= previous['bb_lower'] and
             current['volume_ratio'] > self.volume_threshold
         )
         
-        # Check for moving average crossovers
+        # Check for moving average crossovers (trend changes)
         ma_bullish = (
             current['ema_20'] > current['sma_50'] and
             previous['ema_20'] <= previous['sma_50'] and
@@ -455,14 +473,35 @@ class EnhancedTelegramBot:
         )
         
         # Determine direction and strength
-        if resistance_break or ma_bullish:
+        bullish_signals = []
+        bearish_signals = []
+        
+        if resistance_break:
+            bullish_signals.append("High Break")
+        if bb_resistance_break:
+            bullish_signals.append("BB Upper")
+        if ma_bullish:
+            bullish_signals.append("MA Cross")
+            
+        if support_break:
+            bearish_signals.append("Low Break")
+        if bb_support_break:
+            bearish_signals.append("BB Lower")
+        if ma_bearish:
+            bearish_signals.append("MA Cross")
+        
+        # Return bullish breakout
+        if bullish_signals:
             strength = "STRONG" if current['volume_ratio'] > 2.0 else "MODERATE"
-            analysis = f"RSI: {current['rsi']:.1f}, Volume: {current['volume_ratio']:.1f}x"
+            signal_text = "+".join(bullish_signals)
+            analysis = f"{signal_text} | RSI: {current['rsi']:.1f} | Vol: {current['volume_ratio']:.1f}x | High: ${recent_high:.4f}"
             return "bullish", strength, analysis
             
-        elif support_break or ma_bearish:
+        # Return bearish breakout
+        elif bearish_signals:
             strength = "STRONG" if current['volume_ratio'] > 2.0 else "MODERATE"
-            analysis = f"RSI: {current['rsi']:.1f}, Volume: {current['volume_ratio']:.1f}x"
+            signal_text = "+".join(bearish_signals)
+            analysis = f"{signal_text} | RSI: {current['rsi']:.1f} | Vol: {current['volume_ratio']:.1f}x | Low: ${recent_low:.4f}"
             return "bearish", strength, analysis
             
         return None, None, None
