@@ -632,13 +632,13 @@ async def start_command(update, context: ContextTypes.DEFAULT_TYPE):
         "Features:\n"
         "🚀 Breakout alerts for 19 symbols\n"
         "📊 BTC order book analysis every 30min\n"
-        "/analyze SYMBOL - Run order book analysis for SYMBOL (e.g. BTC/USDT)\n"
-        "Commands:\n"
+        "\nCommands:\n"
         "/start - Show this message\n"
         "/status - Check bot status\n"
         "/symbols - Show monitored symbols\n"
-        "/orderbook - Get instant order book analysis\n"
-        "/analyze SYMBOL - Analyze order book for a given symbol\n"
+        "/orderbook - Get instant BTC/USDT order book analysis\n"
+        "/analyze SYMBOL - Analyze order book for specific symbol\n"
+        "/analyze all - Analyze all 19 watchlist symbols\n"
         "/stop - Stop monitoring",
         parse_mode='HTML'
     )
@@ -683,7 +683,7 @@ async def orderbook_command(update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Failed to fetch order book data for BTC/USDT", parse_mode='HTML')
 
 async def analyze_command(update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /analyze <symbol> command for order book analysis"""
+    """Handle /analyze <symbol> or /analyze all command for order book analysis"""
     bot_instance = context.bot_data.get('bot_instance')
     if not bot_instance:
         await update.message.reply_text("❌ Bot not initialized", parse_mode='HTML')
@@ -692,10 +692,52 @@ async def analyze_command(update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
     if not args:
         await update.message.reply_text(
-            "Usage: /analyze SYMBOL (e.g. BTC/USDT)", parse_mode='HTML'
+            "Usage: /analyze SYMBOL (e.g. BTC/USDT) or /analyze all", parse_mode='HTML'
         )
         return
 
+    # Handle /analyze all command
+    if args[0].lower() == 'all':
+        await update.message.reply_text("📊 Analyzing all watchlist symbols... This may take a moment.", parse_mode='HTML')
+        
+        results = []
+        for symbol in bot_instance.symbols:
+            try:
+                analysis = bot_instance.orderbook_analyzer.analyze_order_book(symbol)
+                if analysis:
+                    # Create condensed report for multiple symbols
+                    mid_price = analysis['mid_price']
+                    decimals = 6 if mid_price < 1 else 4 if mid_price < 100 else 2
+                    
+                    sentiment = analysis.get('market_sentiment', 'NEUTRAL')
+                    liquidity = analysis.get('liquidity_score', 0)
+                    spread = analysis.get('spread_bps', 0)
+                    imbalance = analysis.get('immediate_imbalance', 0)
+                    
+                    # Use emojis for quick visual scanning
+                    sentiment_emoji = "🟢" if "BULLISH" in sentiment else "🔴" if "BEARISH" in sentiment else "⚪"
+                    
+                    results.append(
+                        f"{sentiment_emoji} <b>{symbol}</b>: ${mid_price:.{decimals}f} | "
+                        f"L:{liquidity:.0f} | S:{spread:.1f}bps | I:{imbalance:.0%}"
+                    )
+                else:
+                    results.append(f"❌ <b>{symbol}</b>: Failed to fetch data")
+            except Exception as e:
+                results.append(f"⚠️ <b>{symbol}</b>: Error - {str(e)[:30]}")
+        
+        # Send results in chunks to avoid message length limits
+        chunk_size = 10
+        for i in range(0, len(results), chunk_size):
+            chunk = results[i:i+chunk_size]
+            header = f"📊 <b>Order Book Analysis ({i+1}-{min(i+chunk_size, len(results))} of {len(results)})</b>\n\n"
+            message = header + "\n".join(chunk)
+            message += "\n\n<i>L=Liquidity, S=Spread, I=Imbalance</i>"
+            await update.message.reply_text(message, parse_mode='HTML')
+        
+        return
+
+    # Handle single symbol analysis
     symbol = args[0].upper()
     # Normalize symbol if given without slash (e.g., ETHUSDT → ETH/USDT)
     if '/' not in symbol and symbol.endswith('USDT'):
