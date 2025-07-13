@@ -697,18 +697,32 @@ Ready to monitor! 📈""")
         orderbook_task = asyncio.create_task(self.order_book_monitor())
         
         await asyncio.gather(breakout_task, orderbook_task)
-    
+
     async def breakout_monitor(self):
-        """Monitor breakouts"""
+        """Monitor breakouts at candle close"""
+        # Timeframe for candles (matches get_ohlcv default)
+        tf = '1h'
+        # Map units to seconds
+        sec_map = {'m': 60, 'h': 3600, 'd': 86400}
+        unit = tf[-1]
+        val = int(tf[:-1])
+        seconds_per_candle = sec_map.get(unit, 3600) * val
+
         while self.running:
             try:
-                logger.info("Scanning markets for breakouts...")
+                # Calculate how long until the next candle close
+                now_ts = time.time()
+                next_close_ts = (int(now_ts // seconds_per_candle) + 1) * seconds_per_candle
+                wait = next_close_ts - now_ts
+                logger.info(f"Waiting {wait:.1f}s until next candle close ({tf})")
+                await asyncio.sleep(wait)
+
+                # At candle close, scan for breakouts
+                logger.info("Scanning markets for breakouts at candle close...")
                 alerts = await self.scan_markets()
                 if alerts:
                     logger.info(f"Sent {len(alerts)} breakout alerts")
-                
-                await asyncio.sleep(600)  # 10 minutes
-                
+
             except Exception as e:
                 logger.error(f"Breakout monitoring error: {e}")
                 await asyncio.sleep(60)
