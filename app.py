@@ -168,13 +168,94 @@ class OrderBookAnalyzer:
 
     def classify_market_sentiment(self, analysis: Dict) -> str:
         """Classify overall market sentiment based on order book"""
-        # ... existing logic ...
-        return "NEUTRAL"  # placeholder
+        spread_bps = analysis.get('spread_bps', 0)
+        imbalance = analysis.get('immediate_imbalance', 0)
+        bid_walls = analysis.get('large_bid_walls', 0)
+        ask_walls = analysis.get('large_ask_walls', 0)
+        
+        # Determine sentiment based on multiple factors
+        sentiment_score = 0
+        
+        # Imbalance factor
+        if imbalance > 0.3:
+            sentiment_score += 2  # Bullish
+        elif imbalance > 0.1:
+            sentiment_score += 1  # Slightly bullish
+        elif imbalance < -0.3:
+            sentiment_score -= 2  # Bearish
+        elif imbalance < -0.1:
+            sentiment_score -= 1  # Slightly bearish
+            
+        # Wall factor
+        if bid_walls > ask_walls + 1:
+            sentiment_score += 1  # More support
+        elif ask_walls > bid_walls + 1:
+            sentiment_score -= 1  # More resistance
+            
+        # Spread factor (tight spreads are healthier)
+        if spread_bps < 2:
+            sentiment_score += 0.5
+        elif spread_bps > 10:
+            sentiment_score -= 0.5
+            
+        # Classify sentiment
+        if sentiment_score >= 2:
+            return "STRONGLY_BULLISH"
+        elif sentiment_score >= 1:
+            return "BULLISH"
+        elif sentiment_score <= -2:
+            return "STRONGLY_BEARISH"
+        elif sentiment_score <= -1:
+            return "BEARISH"
+        else:
+            return "NEUTRAL"
 
     def calculate_liquidity_score(self, analysis: Dict) -> float:
         """Calculate overall liquidity health score (0-100)"""
-        # ... existing logic ...
-        return 50  # placeholder
+        score = 50  # Start with neutral
+        
+        # Spread component (30% weight)
+        spread_bps = analysis.get('spread_bps', 0)
+        if spread_bps < 2:
+            score += 20
+        elif spread_bps < 5:
+            score += 10
+        elif spread_bps > 15:
+            score -= 20
+        elif spread_bps > 10:
+            score -= 10
+            
+        # Depth component (40% weight)
+        bid_depth = analysis.get('bid_depth_1pct', 0)
+        ask_depth = analysis.get('ask_depth_1pct', 0)
+        total_depth = bid_depth + ask_depth
+        
+        if total_depth > 1000000:  # High liquidity
+            score += 25
+        elif total_depth > 500000:  # Good liquidity
+            score += 15
+        elif total_depth > 100000:  # Moderate liquidity
+            score += 5
+        elif total_depth < 10000:  # Low liquidity
+            score -= 20
+            
+        # Balance component (20% weight)
+        imbalance = abs(analysis.get('immediate_imbalance', 0))
+        if imbalance < 0.1:
+            score += 10
+        elif imbalance < 0.3:
+            score += 5
+        elif imbalance > 0.6:
+            score -= 15
+            
+        # Support/resistance levels (10% weight)
+        total_walls = analysis.get('large_bid_walls', 0) + analysis.get('large_ask_walls', 0)
+        if total_walls > 3:
+            score += 5
+        elif total_walls == 0:
+            score -= 5
+            
+        return max(0, min(100, score))
 
     def analyze_order_book(self, symbol: str = 'BTC/USDT') -> Optional[Dict]:
         """Run complete order book analysis for given symbol"""
@@ -202,12 +283,63 @@ class OrderBookAnalyzer:
 
     def generate_report(self, analysis: Dict) -> str:
         """Generate order book report"""
-        # ... existing report formatting ...
-        return "<report>"
+        report = f"📊 <b>Order Book Analysis</b>\n"
+        report += f"💰 Mid Price: ${analysis['mid_price']:.2f}\n"
+        report += f"📈 Spread: {analysis['spread_bps']:.2f} bps\n\n"
+        
+        # Market pressure
+        if 'immediate_imbalance' in analysis:
+            imbalance = analysis['immediate_imbalance']
+            if abs(imbalance) > 0.3:
+                direction = "BULLISH" if imbalance > 0 else "BEARISH"
+                report += f"⚡ Market Pressure: <b>{direction}</b> ({imbalance:.1%})\n"
+            else:
+                report += f"⚖️ Market Pressure: BALANCED ({imbalance:.1%})\n"
+        
+        # Significant levels
+        if analysis.get('large_bid_walls', 0) > 0:
+            report += f"🟢 Large Bid Walls: {analysis['large_bid_walls']}\n"
+        if analysis.get('large_ask_walls', 0) > 0:
+            report += f"🔴 Large Ask Walls: {analysis['large_ask_walls']}\n"
+            
+        # Liquidity and sentiment
+        report += f"\n💧 Liquidity Score: {analysis.get('liquidity_score', 0):.0f}/100\n"
+        report += f"🎯 Sentiment: <b>{analysis.get('market_sentiment', 'NEUTRAL')}</b>"
+        
+        return report
 
     def store_analysis(self, analysis: Dict):
         """Store analysis in database"""
-        # ... existing DB insert ...
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            cursor.execute('''
+                INSERT INTO orderbook_analysis (
+                    mid_price, spread_bps, bid_ask_imbalance,
+                    bid_depth_1pct, ask_depth_1pct, bid_depth_5pct, ask_depth_5pct,
+                    large_bid_walls, large_ask_walls, liquidity_score, market_sentiment
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                analysis.get('mid_price', 0),
+                analysis.get('spread_bps', 0),
+                analysis.get('immediate_imbalance', 0),
+                analysis.get('bid_depth_1pct', 0),
+                analysis.get('ask_depth_1pct', 0),
+                analysis.get('bid_depth_5pct', 0),
+                analysis.get('ask_depth_5pct', 0),
+                analysis.get('large_bid_walls', 0),
+                analysis.get('large_ask_walls', 0),
+                analysis.get('liquidity_score', 0),
+                analysis.get('market_sentiment', 'NEUTRAL')
+            ))
+            
+            conn.commit()
+            conn.close()
+            logger.info("Order book analysis stored in database")
+            
+        except Exception as e:
+            logger.error(f"Failed to store analysis: {e}")
 
 
 class EnhancedTelegramBot:
@@ -243,30 +375,166 @@ class EnhancedTelegramBot:
 
     def calculate_levels(self, df):
         """Calculate indicators"""
-        # ... existing indicator code ...
+        # Calculate moving averages
+        df['sma_20'] = df['close'].rolling(window=20).mean()
+        df['sma_50'] = df['close'].rolling(window=50).mean()
+        
+        # Calculate EMA
+        df['ema_20'] = df['close'].ewm(span=20).mean()
+        
+        # Calculate RSI
+        delta = df['close'].diff()
+        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+        rs = gain / loss
+        df['rsi'] = 100 - (100 / (1 + rs))
+        
+        # Calculate Bollinger Bands
+        df['bb_middle'] = df['close'].rolling(window=20).mean()
+        bb_std = df['close'].rolling(window=20).std()
+        df['bb_upper'] = df['bb_middle'] + (bb_std * 2)
+        df['bb_lower'] = df['bb_middle'] - (bb_std * 2)
+        
+        # Calculate volume indicators
+        df['volume_sma'] = df['volume'].rolling(window=20).mean()
+        df['volume_ratio'] = df['volume'] / df['volume_sma']
+        
         return df
 
     def check_breakout(self, df):
         """Check for breakout conditions"""
-        # ... existing breakout logic ...
+        if len(df) < self.lookback:
+            return None, None, None
+            
+        current = df.iloc[-1]
+        previous = df.iloc[-2]
+        
+        # Check for price breakouts
+        resistance_break = (
+            current['close'] > current['bb_upper'] and
+            previous['close'] <= previous['bb_upper'] and
+            current['volume_ratio'] > self.volume_threshold
+        )
+        
+        support_break = (
+            current['close'] < current['bb_lower'] and
+            previous['close'] >= previous['bb_lower'] and
+            current['volume_ratio'] > self.volume_threshold
+        )
+        
+        # Check for moving average crossovers
+        ma_bullish = (
+            current['ema_20'] > current['sma_50'] and
+            previous['ema_20'] <= previous['sma_50'] and
+            current['volume_ratio'] > 1.2
+        )
+        
+        ma_bearish = (
+            current['ema_20'] < current['sma_50'] and
+            previous['ema_20'] >= previous['sma_50'] and
+            current['volume_ratio'] > 1.2
+        )
+        
+        # Determine direction and strength
+        if resistance_break or ma_bullish:
+            strength = "STRONG" if current['volume_ratio'] > 2.0 else "MODERATE"
+            analysis = f"RSI: {current['rsi']:.1f}, Volume: {current['volume_ratio']:.1f}x"
+            return "bullish", strength, analysis
+            
+        elif support_break or ma_bearish:
+            strength = "STRONG" if current['volume_ratio'] > 2.0 else "MODERATE"
+            analysis = f"RSI: {current['rsi']:.1f}, Volume: {current['volume_ratio']:.1f}x"
+            return "bearish", strength, analysis
+            
         return None, None, None
 
     async def send_alert(self, message):
         """Send alert to Telegram"""
-        # ... existing send logic ...
+        try:
+            await self.bot.send_message(
+                chat_id=self.chat_id,
+                text=message,
+                parse_mode='HTML'
+            )
+            logger.info(f"Alert sent: {message[:50]}...")
+        except Exception as e:
+            logger.error(f"Failed to send alert: {e}")
 
     async def scan_markets(self):
         """Scan all markets for breakouts"""
-        # ... existing scan logic ...
-        return []
+        alerts = []
+        for symbol in self.symbols:
+            try:
+                df = self.get_ohlcv(symbol)
+                if df is None or len(df) < self.lookback:
+                    continue
+                
+                df = self.calculate_levels(df)
+                direction, strength, analysis = self.check_breakout(df)
+                
+                if direction and strength:
+                    message = f"🚀 <b>{symbol} {direction.upper()} BREAKOUT</b>\n"
+                    message += f"Strength: {strength}\n"
+                    message += f"Price: ${df['close'].iloc[-1]:.4f}\n"
+                    if analysis:
+                        message += f"Analysis: {analysis}"
+                    
+                    await self.send_alert(message)
+                    alerts.append(symbol)
+                    
+            except Exception as e:
+                logger.error(f"Error scanning {symbol}: {e}")
+                
+        return alerts
 
     async def order_book_monitor(self):
         """Monitor order book every 30 minutes"""
-        # ... existing order book monitor logic ...
+        while self.orderbook_running:
+            try:
+                logger.info("Running order book analysis for BTC/USDT...")
+                analysis = self.orderbook_analyzer.analyze_order_book('BTC/USDT')
+                
+                if analysis:
+                    report = self.orderbook_analyzer.generate_report(analysis)
+                    await self.send_alert(f"📊 <b>Order Book Analysis - BTC/USDT</b>\n\n{report}")
+                    self.orderbook_analyzer.store_analysis(analysis)
+                    logger.info("Order book analysis completed and sent")
+                else:
+                    logger.warning("Failed to get order book analysis")
+                    
+            except Exception as e:
+                logger.error(f"Order book monitoring error: {e}")
+                
+            await asyncio.sleep(1800)  # 30 minutes
 
     async def start_monitoring(self):
         """Start both breakout and order book monitoring"""
-        # ... existing start logic ...
+        if self.running:
+            logger.info("Monitoring already running")
+            return
+            
+        self.running = True
+        self.orderbook_running = True
+        
+        logger.info("Starting enhanced monitoring...")
+        
+        # Start breakout monitoring task
+        breakout_task = asyncio.create_task(self.breakout_monitor())
+        logger.info("Breakout monitoring started")
+        
+        # Start order book monitoring task
+        orderbook_task = asyncio.create_task(self.order_book_monitor())
+        logger.info("Order book monitoring started")
+        
+        # Send startup notification
+        await self.send_alert(
+            "🤖 <b>Enhanced Crypto Bot Started</b>\n\n"
+            "🚀 Breakout monitoring: ACTIVE\n"
+            "📊 Order book analysis: ACTIVE\n\n"
+            f"Monitoring {len(self.symbols)} symbols"
+        )
+        
+        return breakout_task, orderbook_task
 
     async def breakout_monitor(self):
         """Monitor breakouts at candle close"""
@@ -399,11 +667,12 @@ def main():
 
     bot = EnhancedTelegramBot(BOT_TOKEN, CHAT_ID)
 
-    async def post_init(app):
-        logger.info("Post init called - starting enhanced monitoring")
-        asyncio.create_task(bot.start_monitoring())
+    async def post_init(application):
+        logger.info("Bot initialization complete - starting enhanced monitoring")
+        bot_instance = application.bot_data['bot_instance']
+        await bot_instance.start_monitoring()
 
-    application = Application.builder().token(BOT_TOKEN).build()
+    application = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
 
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("status", status_command))
@@ -413,7 +682,6 @@ def main():
     application.add_handler(CommandHandler("stop", stop_command))
 
     application.bot_data['bot_instance'] = bot
-    application.post_init = post_init
 
     logger.info("Starting enhanced Telegram bot...")
     application.run_polling()
