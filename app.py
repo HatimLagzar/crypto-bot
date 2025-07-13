@@ -462,6 +462,17 @@ class EnhancedTelegramBot:
         rs = avg_gain / avg_loss
         df['rsi'] = 100 - (100 / (1 + rs))
 
+        # MACD (12,26,9) calculation
+        ema12 = df['close'].ewm(span=12, adjust=False).mean()
+        ema26 = df['close'].ewm(span=26, adjust=False).mean()
+        df['macd'] = ema12 - ema26
+        df['macd_signal'] = df['macd'].ewm(span=9, adjust=False).mean()
+        df['macd_hist'] = df['macd'] - df['macd_signal']
+
+        # VWAP calculation
+        typical_price = (df['high'] + df['low'] + df['close']) / 3
+        df['vwap'] = (typical_price * df['volume']).cumsum() / df['volume'].cumsum()
+
         return df
     
     def check_breakout(self, df):
@@ -571,7 +582,50 @@ Volume spike detected! 📊
 """
                         await self.send_alert(message)
                         alerts_sent.append(f"{symbol} RSI_Divergence_{div_signal}")
-                    
+
+                # MACD zero-line crossover detection
+                if len(df) >= 2 and 'macd_hist' in df:
+                    hist_prev = df['macd_hist'].iloc[-2]
+                    hist_curr = df['macd_hist'].iloc[-1]
+                    if hist_prev < 0 and hist_curr > 0:
+                        macd_signal = 'BULLISH'
+                    elif hist_prev > 0 and hist_curr < 0:
+                        macd_signal = 'BEARISH'
+                    else:
+                        macd_signal = None
+                    if macd_signal:
+                        timestamp = datetime.now().strftime("%H:%M:%S")
+                        direction_emoji = "🚀" if macd_signal == "BULLISH" else "📉"
+                        message = f"""{direction_emoji} <b>{macd_signal} MACD Zero-Line Crossover</b>
+
+<b>Symbol:</b> {symbol}
+<b>Price:</b> ${df['close'].iloc[-1]:.4f}
+<b>Time:</b> {timestamp}
+"""
+                        await self.send_alert(message)
+                        alerts_sent.append(f"{symbol} MACD_ZeroLine_{macd_signal}")
+
+                # VWAP cross detection
+                if len(df) >= 2 and 'vwap' in df:
+                    prev_close, curr_close = df['close'].iloc[-2], df['close'].iloc[-1]
+                    prev_vwap, curr_vwap = df['vwap'].iloc[-2], df['vwap'].iloc[-1]
+                    if prev_close < prev_vwap and curr_close > curr_vwap:
+                        vwap_signal = 'BULLISH'
+                    elif prev_close > prev_vwap and curr_close < curr_vwap:
+                        vwap_signal = 'BEARISH'
+                    else:
+                        vwap_signal = None
+                    if vwap_signal:
+                        timestamp = datetime.now().strftime("%H:%M:%S")
+                        direction_emoji = "🚀" if vwap_signal == "BULLISH" else "📉"
+                        message = f"""{direction_emoji} <b>{vwap_signal} VWAP Cross</b>
+
+<b>Symbol:</b> {symbol}
+<b>Price:</b> ${df['close'].iloc[-1]:.4f}
+<b>Time:</b> {timestamp}
+"""
+                        await self.send_alert(message)
+                        alerts_sent.append(f"{symbol} VWAP_Cross_{vwap_signal}")
             except Exception as e:
                 logger.error(f"Error scanning {symbol}: {e}")
         
