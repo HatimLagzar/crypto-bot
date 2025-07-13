@@ -296,11 +296,23 @@ class OrderBookAnalyzer:
             else:
                 report += f"⚖️ Market Pressure: BALANCED ({imbalance:.1%})\n"
         
-        # Significant levels
-        if analysis.get('large_bid_walls', 0) > 0:
-            report += f"🟢 Large Bid Walls: {analysis['large_bid_walls']}\n"
-        if analysis.get('large_ask_walls', 0) > 0:
-            report += f"🔴 Large Ask Walls: {analysis['large_ask_walls']}\n"
+        # Significant levels with prices
+        significant_bids = analysis.get('significant_bids', [])
+        significant_asks = analysis.get('significant_asks', [])
+        
+        if significant_bids:
+            report += f"\n🟢 <b>Key Support Levels:</b>\n"
+            for bid in significant_bids[:3]:  # Show top 3
+                report += f"  ${bid['price']:.2f} ({bid['distance_pct']:.2f}% below)\n"
+                
+        if significant_asks:
+            report += f"\n🔴 <b>Key Resistance Levels:</b>\n"
+            for ask in significant_asks[:3]:  # Show top 3
+                report += f"  ${ask['price']:.2f} ({ask['distance_pct']:.2f}% above)\n"
+        
+        # Wall counts
+        if analysis.get('large_bid_walls', 0) > 0 or analysis.get('large_ask_walls', 0) > 0:
+            report += f"\n📊 Large Walls: {analysis.get('large_bid_walls', 0)} bids, {analysis.get('large_ask_walls', 0)} asks\n"
             
         # Liquidity and sentiment
         report += f"\n💧 Liquidity Score: {analysis.get('liquidity_score', 0):.0f}/100\n"
