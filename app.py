@@ -430,6 +430,10 @@ class EnhancedTelegramBot:
         
         # Initialize order book analyzer
         self.orderbook_analyzer = OrderBookAnalyzer()
+
+        # For price-based sentiment flip detection
+        self.last_macd_hist = None
+        self.last_vwap_price = None
         
     def get_ohlcv(self, symbol, timeframe='1h', limit=50):
         """Fetch OHLCV data"""
@@ -644,6 +648,32 @@ Volume spike detected! 📊
                     await self.send_alert(report)
                     self.orderbook_analyzer.store_analysis(analysis)
                     logger.info("Order book report sent")
+
+                    # Price-based sentiment flip detection
+                    df = self.get_ohlcv('BTC/USDT')
+                    if df is not None:
+                        df = self.calculate_levels(df)
+                        # MACD flip
+                        macd_hist = df['macd_hist'].iloc[-1]
+                        if self.last_macd_hist is not None:
+                            if self.last_macd_hist < 0 <= macd_hist:
+                                await self.send_alert(f"⚡ <b>BULLISH MACD Sentiment Flip</b>\nTime: {datetime.now().strftime('%H:%M:%S')}")
+                            elif self.last_macd_hist > 0 >= macd_hist:
+                                await self.send_alert(f"⚡ <b>BEARISH MACD Sentiment Flip</b>\nTime: {datetime.now().strftime('%H:%M:%S')}")
+                        self.last_macd_hist = macd_hist
+
+                        # VWAP flip
+                        curr_price = df['close'].iloc[-1]
+                        curr_vwap = df['vwap'].iloc[-1]
+                        if self.last_vwap_price is not None:
+                            prev_price, prev_vwap = self.last_vwap_price, self.last_vwap_price_vwap
+                            if prev_price < prev_vwap and curr_price > curr_vwap:
+                                await self.send_alert(f"⚡ <b>BULLISH VWAP Sentiment Flip</b>\nTime: {datetime.now().strftime('%H:%M:%S')}")
+                            elif prev_price > prev_vwap and curr_price < curr_vwap:
+                                await self.send_alert(f"⚡ <b>BEARISH VWAP Sentiment Flip</b>\nTime: {datetime.now().strftime('%H:%M:%S')}")
+                        # Store for next cycle
+                        self.last_vwap_price = curr_price
+                        self.last_vwap_price_vwap = curr_vwap
                 
                 # Wait 30 minutes
                 await asyncio.sleep(1800)
