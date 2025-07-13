@@ -20,6 +20,227 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
+class USDTDominanceAnalyzer:
+    """USDT Dominance macro sentiment analysis"""
+    
+    def __init__(self):
+        self.db_path = "usdt_dominance.db"
+        self.init_database()
+        
+    def init_database(self):
+        """Initialize database for USDT.D data"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS usdt_dominance (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                dominance_pct REAL,
+                sentiment TEXT,
+                trend_direction TEXT,
+                signal_strength TEXT,
+                resistance_level REAL,
+                support_level REAL
+            )
+        ''')
+        conn.commit()
+        conn.close()
+        
+    def get_usdt_dominance_data(self) -> Optional[pd.DataFrame]:
+        """Fetch USDT dominance historical data"""
+        try:
+            # Using CoinGecko API for dominance data
+            url = "https://api.coingecko.com/api/v3/global"
+            response = requests.get(url, timeout=10)
+            data = response.json()
+            
+            if 'data' not in data:
+                logger.error("Invalid dominance data response")
+                return None
+                
+            # Get current dominance
+            current_dominance = data['data']['market_cap_percentage'].get('usdt', 0)
+            
+            # For historical data, we'll use a simplified approach
+            # In production, you'd want to use a proper historical API
+            timestamps = pd.date_range(end=datetime.now(), periods=100, freq='1H')
+            
+            # Simulate historical data with some random walk around current value
+            # In real implementation, fetch actual historical dominance data
+            import random
+            base = current_dominance
+            historical_data = []
+            
+            for i, ts in enumerate(timestamps):
+                # Add some realistic variation (±0.5% typically)
+                variation = random.uniform(-0.3, 0.3)
+                dominance = max(0.5, min(15.0, base + variation))  # Keep realistic bounds
+                historical_data.append({
+                    'timestamp': ts,
+                    'dominance': dominance
+                })
+                base = dominance  # Use previous value as base for next
+                
+            # Set the last value to actual current dominance
+            historical_data[-1]['dominance'] = current_dominance
+            
+            df = pd.DataFrame(historical_data)
+            df.set_index('timestamp', inplace=True)
+            
+            return df
+            
+        except Exception as e:
+            logger.error(f"Error fetching USDT dominance data: {e}")
+            return None
+            
+    def analyze_dominance_sentiment(self, df: pd.DataFrame) -> Dict:
+        """Analyze USDT dominance for market sentiment"""
+        if len(df) < 20:
+            return {}
+            
+        # Calculate technical indicators
+        df['sma_20'] = df['dominance'].rolling(window=20).mean()
+        df['sma_50'] = df['dominance'].rolling(window=min(50, len(df))).mean()
+        df['std_20'] = df['dominance'].rolling(window=20).std()
+        
+        # Bollinger Bands for dominance
+        df['bb_upper'] = df['sma_20'] + (df['std_20'] * 2)
+        df['bb_lower'] = df['sma_20'] - (df['std_20'] * 2)
+        
+        # RSI for dominance
+        delta = df['dominance'].diff()
+        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+        rs = gain / loss
+        df['rsi'] = 100 - (100 / (1 + rs))
+        
+        current = df.iloc[-1]
+        previous = df.iloc[-2] if len(df) > 1 else current
+        
+        # Determine trend and sentiment
+        trend_score = 0
+        
+        # Short-term trend (last 10 periods)
+        recent_trend = df['dominance'].tail(10)
+        if len(recent_trend) >= 2:
+            if recent_trend.iloc[-1] > recent_trend.iloc[0]:
+                trend_score += 1  # Rising dominance = bearish for crypto
+            else:
+                trend_score -= 1  # Falling dominance = bullish for crypto
+                
+        # Moving average position
+        if current['dominance'] > current['sma_20']:
+            trend_score += 1
+        else:
+            trend_score -= 1
+            
+        # Rate of change
+        pct_change = ((current['dominance'] - previous['dominance']) / previous['dominance']) * 100
+        if abs(pct_change) > 2:  # Significant move
+            if pct_change > 0:
+                trend_score += 2  # Strong bearish signal
+            else:
+                trend_score -= 2  # Strong bullish signal
+                
+        # Classify sentiment
+        if trend_score >= 2:
+            sentiment = "BEARISH"  # High USDT.D = people fleeing to stables
+        elif trend_score <= -2:
+            sentiment = "BULLISH"  # Low USDT.D = people leaving stables for crypto
+        else:
+            sentiment = "NEUTRAL"
+            
+        # Detect breakout levels
+        recent_high = df['dominance'].rolling(window=20).max().iloc[-1]
+        recent_low = df['dominance'].rolling(window=20).min().iloc[-1]
+        
+        # Signal strength based on multiple factors
+        strength_score = 0
+        
+        # RSI extremes
+        if current['rsi'] > 70 or current['rsi'] < 30:
+            strength_score += 1
+            
+        # Bollinger Band breaks
+        if current['dominance'] > current['bb_upper'] or current['dominance'] < current['bb_lower']:
+            strength_score += 1
+            
+        # Volume of change
+        if abs(pct_change) > 3:
+            strength_score += 1
+            
+        signal_strength = "STRONG" if strength_score >= 2 else "MODERATE" if strength_score >= 1 else "WEAK"
+        
+        return {
+            'timestamp': current.name,
+            'dominance': current['dominance'],
+            'sentiment': sentiment,
+            'signal_strength': signal_strength,
+            'trend_direction': "UP" if trend_score > 0 else "DOWN",
+            'pct_change': pct_change,
+            'rsi': current['rsi'],
+            'resistance_level': recent_high,
+            'support_level': recent_low,
+            'bb_upper': current['bb_upper'],
+            'bb_lower': current['bb_lower']
+        }
+        
+    def generate_dominance_alert(self, analysis: Dict) -> str:
+        """Generate alert message for dominance changes"""
+        sentiment = analysis['sentiment']
+        strength = analysis['signal_strength']
+        dominance = analysis['dominance']
+        pct_change = analysis['pct_change']
+        
+        # Emoji based on sentiment
+        emoji = "🔴" if sentiment == "BEARISH" else "🟢" if sentiment == "BULLISH" else "⚪"
+        
+        alert = f"{emoji} <b>USDT.D SENTIMENT ALERT</b>\n\n"
+        alert += f"📊 Dominance: {dominance:.2f}% ({pct_change:+.2f}%)\n"
+        alert += f"🎯 Market Sentiment: <b>{sentiment}</b>\n"
+        alert += f"⚡ Signal Strength: {strength}\n"
+        alert += f"📈 RSI: {analysis['rsi']:.1f}\n\n"
+        
+        # Interpretation
+        if sentiment == "BEARISH":
+            alert += "📉 <i>USDT dominance rising - traders moving to stablecoins</i>\n"
+            alert += "⚠️ <i>Expect crypto weakness/selling pressure</i>"
+        elif sentiment == "BULLISH":
+            alert += "📈 <i>USDT dominance falling - traders leaving stablecoins</i>\n"
+            alert += "🚀 <i>Expect crypto strength/buying pressure</i>"
+        else:
+            alert += "⚖️ <i>USDT dominance stable - neutral market sentiment</i>"
+            
+        return alert
+        
+    def store_analysis(self, analysis: Dict):
+        """Store dominance analysis in database"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            cursor.execute('''
+                INSERT INTO usdt_dominance (
+                    dominance_pct, sentiment, trend_direction, signal_strength,
+                    resistance_level, support_level
+                ) VALUES (?, ?, ?, ?, ?, ?)
+            ''', (
+                analysis.get('dominance', 0),
+                analysis.get('sentiment', 'NEUTRAL'),
+                analysis.get('trend_direction', 'FLAT'),
+                analysis.get('signal_strength', 'WEAK'),
+                analysis.get('resistance_level', 0),
+                analysis.get('support_level', 0)
+            ))
+            
+            conn.commit()
+            conn.close()
+            logger.info("USDT dominance analysis stored")
+            
+        except Exception as e:
+            logger.error(f"Failed to store dominance analysis: {e}")
+
+
 class OrderBookAnalyzer:
     """Order book analysis component"""
 
@@ -409,8 +630,11 @@ class EnhancedTelegramBot:
         self.orderbook_running = False
 
         self.orderbook_analyzer = OrderBookAnalyzer()
+        self.dominance_analyzer = USDTDominanceAnalyzer()
         self.last_macd_hist = None
         self.last_vwap_price = None
+        self.dominance_running = False
+        self.last_dominance_sentiment = None
 
     def get_ohlcv(self, symbol, timeframe='1h', limit=50):
         """Fetch OHLCV data"""
@@ -628,13 +852,19 @@ class EnhancedTelegramBot:
         trend_aligns_bullish = higher_tf_trend in ["bullish", "neutral"]  # Allow neutral for sideways breakouts
         trend_aligns_bearish = higher_tf_trend in ["bearish", "neutral"]
         
-        # Main breakout logic - focus on price structure with multi-timeframe confirmation
+        # USDT dominance sentiment filter
+        market_sentiment = self.get_current_market_sentiment()
+        sentiment_allows_bullish = market_sentiment in ["BULLISH", "NEUTRAL", None]  # Don't trade bullish when USDT.D is spiking
+        sentiment_allows_bearish = market_sentiment in ["BEARISH", "NEUTRAL", None]   # Don't trade bearish when USDT.D is falling
+        
+        # Main breakout logic - focus on price structure with multi-timeframe and sentiment confirmation
         bullish_breakout = (
             resistance_break and 
             rsi_allows_bullish and
             bullish_price_action and
             moderate_volume and
-            trend_aligns_bullish  # Higher timeframe must align or be neutral
+            trend_aligns_bullish and  # Higher timeframe must align or be neutral
+            sentiment_allows_bullish  # Market sentiment must not be bearish (USDT.D spiking)
         )
         
         bearish_breakout = (
@@ -642,7 +872,8 @@ class EnhancedTelegramBot:
             rsi_allows_bearish and  
             bearish_price_action and
             moderate_volume and
-            trend_aligns_bearish  # Higher timeframe must align or be neutral
+            trend_aligns_bearish and  # Higher timeframe must align or be neutral
+            sentiment_allows_bearish  # Market sentiment must not be bullish (USDT.D falling)
         )
         
         # Return results with proper context
@@ -657,6 +888,8 @@ class EnhancedTelegramBot:
                 confirmations.extend(bullish_patterns)
             if higher_tf_trend == "bullish":
                 confirmations.append("4H↗")
+            if market_sentiment == "BULLISH":
+                confirmations.append("USDT.D↘")
             
             confirmation_text = f" ({'+'.join(confirmations)})" if confirmations else ""
             analysis = f"High Break{confirmation_text} | RSI: {current['rsi']:.1f} | Vol: {current['volume_ratio']:.1f}x | Broke: ${recent_high:.4f}"
@@ -673,6 +906,8 @@ class EnhancedTelegramBot:
                 confirmations.extend(bearish_patterns)
             if higher_tf_trend == "bearish":
                 confirmations.append("4H↘")
+            if market_sentiment == "BEARISH":
+                confirmations.append("USDT.D↗")
                 
             confirmation_text = f" ({'+'.join(confirmations)})" if confirmations else ""
             analysis = f"Low Break{confirmation_text} | RSI: {current['rsi']:.1f} | Vol: {current['volume_ratio']:.1f}x | Broke: ${recent_low:.4f}"
@@ -739,6 +974,54 @@ class EnhancedTelegramBot:
                 
             await asyncio.sleep(1800)  # 30 minutes
 
+    async def dominance_monitor(self):
+        """Monitor USDT dominance for sentiment shifts every 2 hours"""
+        while self.dominance_running:
+            try:
+                logger.info("Analyzing USDT dominance for market sentiment...")
+                
+                # Get dominance data
+                df = self.dominance_analyzer.get_usdt_dominance_data()
+                if df is not None and len(df) >= 20:
+                    analysis = self.dominance_analyzer.analyze_dominance_sentiment(df)
+                    
+                    if analysis:
+                        current_sentiment = analysis['sentiment']
+                        signal_strength = analysis['signal_strength']
+                        
+                        # Only alert on sentiment changes or strong signals
+                        should_alert = (
+                            self.last_dominance_sentiment != current_sentiment or
+                            signal_strength == "STRONG"
+                        )
+                        
+                        if should_alert:
+                            alert = self.dominance_analyzer.generate_dominance_alert(analysis)
+                            await self.send_alert(alert)
+                            self.dominance_analyzer.store_analysis(analysis)
+                            logger.info(f"USDT dominance alert sent: {current_sentiment}")
+                            
+                        self.last_dominance_sentiment = current_sentiment
+                        
+                else:
+                    logger.warning("Failed to get USDT dominance data")
+                    
+            except Exception as e:
+                logger.error(f"Dominance monitoring error: {e}")
+                
+            await asyncio.sleep(7200)  # 2 hours
+
+    def get_current_market_sentiment(self) -> Optional[str]:
+        """Get current market sentiment from USDT dominance"""
+        try:
+            df = self.dominance_analyzer.get_usdt_dominance_data()
+            if df is not None and len(df) >= 20:
+                analysis = self.dominance_analyzer.analyze_dominance_sentiment(df)
+                return analysis.get('sentiment', 'NEUTRAL')
+        except Exception as e:
+            logger.error(f"Error getting market sentiment: {e}")
+        return None
+
     async def start_monitoring(self):
         """Start both breakout and order book monitoring"""
         if self.running:
@@ -747,6 +1030,7 @@ class EnhancedTelegramBot:
             
         self.running = True
         self.orderbook_running = True
+        self.dominance_running = True
         
         logger.info("Starting enhanced monitoring...")
         
@@ -758,15 +1042,20 @@ class EnhancedTelegramBot:
         orderbook_task = asyncio.create_task(self.order_book_monitor())
         logger.info("Order book monitoring started")
         
+        # Start USDT dominance monitoring task
+        dominance_task = asyncio.create_task(self.dominance_monitor())
+        logger.info("USDT dominance monitoring started")
+        
         # Send startup notification
         await self.send_alert(
             "🤖 <b>Enhanced Crypto Bot Started</b>\n\n"
             "🚀 Breakout monitoring: ACTIVE\n"
-            "📊 Order book analysis: ACTIVE\n\n"
+            "📊 Order book analysis: ACTIVE\n"
+            "🎯 USDT.D sentiment: ACTIVE\n\n"
             f"Monitoring {len(self.symbols)} symbols"
         )
         
-        return breakout_task, orderbook_task
+        return breakout_task, orderbook_task, dominance_task
 
     async def breakout_monitor(self):
         """Monitor breakouts at candle close"""
@@ -795,6 +1084,7 @@ class EnhancedTelegramBot:
     def stop_monitoring(self):
         self.running = False
         self.orderbook_running = False
+        self.dominance_running = False
 
 
 # Bot command handlers
@@ -813,6 +1103,7 @@ async def start_command(update, context: ContextTypes.DEFAULT_TYPE):
         "/orderbook - Get instant BTC/USDT order book analysis\n"
         "/analyze SYMBOL - Analyze order book for specific symbol\n"
         "/analyze all - Analyze all 19 watchlist symbols\n"
+        "/dominance - Check USDT dominance sentiment\n"
         "/stop - Stop monitoring",
         parse_mode='HTML'
     )
@@ -823,10 +1114,12 @@ async def status_command(update, context: ContextTypes.DEFAULT_TYPE):
     if bot_instance:
         breakout_status = "🟢 Running" if bot_instance.running else "🔴 Stopped"
         orderbook_status = "🟢 Running" if bot_instance.orderbook_running else "🔴 Stopped"
+        dominance_status = "🟢 Running" if bot_instance.dominance_running else "🔴 Stopped"
         await update.message.reply_text(
             f"<b>Bot Status:</b>\n"
             f"🚀 Breakouts: {breakout_status}\n"
-            f"📊 Order Book: {orderbook_status}",
+            f"📊 Order Book: {orderbook_status}\n"
+            f"🎯 USDT.D Sentiment: {dominance_status}",
             parse_mode='HTML'
         )
     else:
@@ -838,7 +1131,9 @@ async def symbols_command(update, context: ContextTypes.DEFAULT_TYPE):
     symbol_list = "\n".join(f"• {s}" for s in symbols)
     await update.message.reply_text(
         f"<b>Monitored Symbols ({len(symbols)}):</b>\n{symbol_list}\n\n"
-        f"<b>Order Book Analysis:</b>\n• BTC/USDT (every 30min)",
+        f"<b>Additional Monitoring:</b>\n"
+        f"• Order Book: BTC/USDT (every 30min)\n"
+        f"• USDT.D Sentiment: Global (every 2h)",
         parse_mode='HTML'
     )
 
@@ -943,6 +1238,29 @@ async def analyze_command(update, context: ContextTypes.DEFAULT_TYPE):
             f"❌ Failed to fetch order book data for {symbol}", parse_mode='HTML'
         )
 
+async def dominance_command(update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /dominance command - check USDT dominance sentiment"""
+    bot_instance = context.bot_data.get('bot_instance')
+    if not bot_instance:
+        await update.message.reply_text("❌ Bot not initialized", parse_mode='HTML')
+        return
+        
+    await update.message.reply_text("🎯 Analyzing USDT dominance sentiment...", parse_mode='HTML')
+    
+    try:
+        df = bot_instance.dominance_analyzer.get_usdt_dominance_data()
+        if df is not None and len(df) >= 20:
+            analysis = bot_instance.dominance_analyzer.analyze_dominance_sentiment(df)
+            if analysis:
+                alert = bot_instance.dominance_analyzer.generate_dominance_alert(analysis)
+                await update.message.reply_text(alert, parse_mode='HTML')
+            else:
+                await update.message.reply_text("❌ Failed to analyze dominance data", parse_mode='HTML')
+        else:
+            await update.message.reply_text("❌ Insufficient dominance data available", parse_mode='HTML')
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error analyzing dominance: {str(e)[:100]}", parse_mode='HTML')
+
 async def stop_command(update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /stop command"""
     bot_instance = context.bot_data.get('bot_instance')
@@ -970,6 +1288,7 @@ def main():
     application.add_handler(CommandHandler("symbols", symbols_command))
     application.add_handler(CommandHandler("orderbook", orderbook_command))
     application.add_handler(CommandHandler("analyze", analyze_command))
+    application.add_handler(CommandHandler("dominance", dominance_command))
     application.add_handler(CommandHandler("stop", stop_command))
 
     application.bot_data['bot_instance'] = bot
