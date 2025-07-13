@@ -398,12 +398,12 @@ def main():
     CHAT_ID = os.getenv("CHAT_ID")
 
     bot = EnhancedTelegramBot(BOT_TOKEN, CHAT_ID)
-    application = (
-        Application.builder()
-        .token(BOT_TOKEN)
-        .post_init(post_init)  # ensure start_monitoring runs automatically
-        .build()
-    )
+
+    async def post_init(app):
+        logger.info("Post init called - starting enhanced monitoring")
+        asyncio.create_task(bot.start_monitoring())
+
+    application = Application.builder().token(BOT_TOKEN).build()
 
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("status", status_command))
@@ -413,10 +413,7 @@ def main():
     application.add_handler(CommandHandler("stop", stop_command))
 
     application.bot_data['bot_instance'] = bot
-
-    async def post_init(app):
-        logger.info("Post init called - starting enhanced monitoring")
-        asyncio.create_task(bot.start_monitoring())
+    application.post_init = post_init
 
     logger.info("Starting enhanced Telegram bot...")
     application.run_polling()
