@@ -33,7 +33,7 @@ class OrderBookAnalyzer:
             'spread_normal_bps': 2,               # 2 basis points normal
             'spread_wide_bps': 5,                 # 5 basis points wide
             'spread_extreme_bps': 10,             # 10 basis points extreme
-            'large_wall_multiplier': 3,           # 3x average size
+            'large_wall_multiplier': 5,           # 5x average size
             'huge_wall_multiplier': 10,           # 10x average size
             'depth_imbalance_strong': 0.3,        # 30% depth difference
             'depth_imbalance_extreme': 0.6,       # 60% depth difference
@@ -176,6 +176,17 @@ class OrderBookAnalyzer:
         # Sort by proximity to current price
         significant_bids.sort(key=lambda x: x['distance_pct'])
         significant_asks.sort(key=lambda x: x['distance_pct'])
+
+        # Filter out near-duplicate levels within 0.1% distance
+        def _filter_levels(levels):
+            filtered = []
+            for lvl in levels:
+                if not any(abs(lvl['distance_pct'] - f['distance_pct']) < 0.1 for f in filtered):
+                    filtered.append(lvl)
+            return filtered
+
+        significant_bids = _filter_levels(significant_bids)
+        significant_asks = _filter_levels(significant_asks)
         
         return {
             'significant_bids': significant_bids[:5],  # Top 5 closest
@@ -587,49 +598,7 @@ Volume spike detected! 📊
                         await self.send_alert(message)
                         alerts_sent.append(f"{symbol} RSI_Divergence_{div_signal}")
 
-                # MACD zero-line crossover detection
-                if len(df) >= 2 and 'macd_hist' in df:
-                    hist_prev = df['macd_hist'].iloc[-2]
-                    hist_curr = df['macd_hist'].iloc[-1]
-                    if hist_prev < 0 and hist_curr > 0:
-                        macd_signal = 'BULLISH'
-                    elif hist_prev > 0 and hist_curr < 0:
-                        macd_signal = 'BEARISH'
-                    else:
-                        macd_signal = None
-                    if macd_signal:
-                        timestamp = datetime.now().strftime("%H:%M:%S")
-                        direction_emoji = "🚀" if macd_signal == "BULLISH" else "📉"
-                        message = f"""{direction_emoji} <b>{macd_signal} MACD Zero-Line Crossover</b>
 
-<b>Symbol:</b> {symbol}
-<b>Price:</b> ${df['close'].iloc[-1]:.4f}
-<b>Time:</b> {timestamp}
-"""
-                        await self.send_alert(message)
-                        alerts_sent.append(f"{symbol} MACD_ZeroLine_{macd_signal}")
-
-                # VWAP cross detection
-                if len(df) >= 2 and 'vwap' in df:
-                    prev_close, curr_close = df['close'].iloc[-2], df['close'].iloc[-1]
-                    prev_vwap, curr_vwap = df['vwap'].iloc[-2], df['vwap'].iloc[-1]
-                    if prev_close < prev_vwap and curr_close > curr_vwap:
-                        vwap_signal = 'BULLISH'
-                    elif prev_close > prev_vwap and curr_close < curr_vwap:
-                        vwap_signal = 'BEARISH'
-                    else:
-                        vwap_signal = None
-                    if vwap_signal:
-                        timestamp = datetime.now().strftime("%H:%M:%S")
-                        direction_emoji = "🚀" if vwap_signal == "BULLISH" else "📉"
-                        message = f"""{direction_emoji} <b>{vwap_signal} VWAP Cross</b>
-
-<b>Symbol:</b> {symbol}
-<b>Price:</b> ${df['close'].iloc[-1]:.4f}
-<b>Time:</b> {timestamp}
-"""
-                        await self.send_alert(message)
-                        alerts_sent.append(f"{symbol} VWAP_Cross_{vwap_signal}")
             except Exception as e:
                 logger.error(f"Error scanning {symbol}: {e}")
         
