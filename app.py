@@ -371,6 +371,9 @@ async def analyze_command(update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     symbol = args[0].upper()
+    # Normalize symbol if given without slash (e.g., ETHUSDT → ETH/USDT)
+    if '/' not in symbol and symbol.endswith('USDT'):
+        symbol = f"{symbol[:-4]}/USDT"
     await update.message.reply_text(f"📊 Analyzing {symbol} order book...", parse_mode='HTML')
     analysis = bot_instance.orderbook_analyzer.analyze_order_book(symbol)
     if analysis:
@@ -395,7 +398,12 @@ def main():
     CHAT_ID = os.getenv("CHAT_ID")
 
     bot = EnhancedTelegramBot(BOT_TOKEN, CHAT_ID)
-    application = Application.builder().token(BOT_TOKEN).build()
+    application = (
+        Application.builder()
+        .token(BOT_TOKEN)
+        .post_init(post_init)  # ensure start_monitoring runs automatically
+        .build()
+    )
 
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("status", status_command))
@@ -410,7 +418,6 @@ def main():
         logger.info("Post init called - starting enhanced monitoring")
         asyncio.create_task(bot.start_monitoring())
 
-    application.post_init = post_init
     logger.info("Starting enhanced Telegram bot...")
     application.run_polling()
 
