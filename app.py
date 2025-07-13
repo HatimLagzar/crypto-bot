@@ -241,6 +241,205 @@ class USDTDominanceAnalyzer:
             logger.error(f"Failed to store dominance analysis: {e}")
 
 
+class VolumeSurgeAnalyzer:
+    """Volume surge detection for early warning alerts"""
+    
+    def __init__(self):
+        self.db_path = "volume_surges.db"
+        self.init_database()
+        
+        # Volume surge thresholds
+        self.thresholds = {
+            'notable': 3.0,      # 3x average volume
+            'significant': 5.0,   # 5x average volume  
+            'extreme': 10.0,      # 10x average volume
+            'mega': 20.0         # 20x average volume (very rare)
+        }
+        
+    def init_database(self):
+        """Initialize database for volume surge data"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS volume_surges (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                symbol TEXT,
+                volume_ratio REAL,
+                surge_type TEXT,
+                price_change_pct REAL,
+                volume_alignment TEXT,
+                risk_assessment TEXT,
+                market_cap_rank INTEGER,
+                alert_sent BOOLEAN DEFAULT 0
+            )
+        ''')
+        conn.commit()
+        conn.close()
+        
+    def analyze_volume_surge(self, symbol: str, df: pd.DataFrame) -> Optional[Dict]:
+        """Analyze symbol for volume surges"""
+        if len(df) < 21:  # Need at least 21 periods for proper analysis
+            return None
+            
+        current = df.iloc[-1]
+        previous = df.iloc[-2] if len(df) > 1 else current
+        
+        # Calculate volume metrics
+        volume_sma_20 = df['volume'].rolling(window=20).mean().iloc[-1]
+        volume_ratio = current['volume'] / volume_sma_20 if volume_sma_20 > 0 else 0
+        
+        # Only proceed if volume surge is significant
+        if volume_ratio < self.thresholds['notable']:
+            return None
+            
+        # Classify surge intensity
+        if volume_ratio >= self.thresholds['mega']:
+            surge_type = "MEGA"
+        elif volume_ratio >= self.thresholds['extreme']:
+            surge_type = "EXTREME"
+        elif volume_ratio >= self.thresholds['significant']:
+            surge_type = "SIGNIFICANT"
+        else:
+            surge_type = "NOTABLE"
+            
+        # Calculate price context
+        price_change_1h = ((current['close'] - previous['close']) / previous['close']) * 100
+        
+        # Determine volume alignment with price
+        if price_change_1h > 2 and volume_ratio > 5:
+            volume_alignment = "BULLISH_BREAKOUT"  # High volume + strong up move
+        elif price_change_1h < -2 and volume_ratio > 5:
+            volume_alignment = "BEARISH_BREAKDOWN"  # High volume + strong down move
+        elif abs(price_change_1h) < 1 and volume_ratio > 10:
+            volume_alignment = "ACCUMULATION"  # Huge volume, little price change
+        elif price_change_1h > 0:
+            volume_alignment = "BULLISH_INTEREST"  # Volume + modest up move
+        else:
+            volume_alignment = "BEARISH_PRESSURE"  # Volume + modest down move
+            
+        # Risk assessment based on multiple factors
+        risk_score = 0
+        
+        # Volume intensity risk
+        if volume_ratio > 20:
+            risk_score += 3  # Extreme volume = high risk
+        elif volume_ratio > 10:
+            risk_score += 2
+        elif volume_ratio > 5:
+            risk_score += 1
+            
+        # Price volatility risk
+        if abs(price_change_1h) > 10:
+            risk_score += 2  # High volatility = high risk
+        elif abs(price_change_1h) > 5:
+            risk_score += 1
+            
+        # Time-based risk (avoid overnight low-volume markets)
+        current_hour = datetime.now().hour
+        if 0 <= current_hour <= 6:  # Overnight hours
+            risk_score += 1
+            
+        # Classify overall risk
+        if risk_score >= 5:
+            risk_assessment = "VERY_HIGH"
+        elif risk_score >= 3:
+            risk_assessment = "HIGH"
+        elif risk_score >= 2:
+            risk_assessment = "MODERATE"
+        else:
+            risk_assessment = "LOW"
+            
+        return {
+            'symbol': symbol,
+            'timestamp': current.name if hasattr(current, 'name') else datetime.now(),
+            'volume_ratio': volume_ratio,
+            'surge_type': surge_type,
+            'price_change_pct': price_change_1h,
+            'volume_alignment': volume_alignment,
+            'risk_assessment': risk_assessment,
+            'current_price': current['close'],
+            'volume_sma_20': volume_sma_20,
+            'current_volume': current['volume']
+        }
+        
+    def generate_volume_alert(self, analysis: Dict) -> str:
+        """Generate volume surge alert message"""
+        symbol = analysis['symbol']
+        volume_ratio = analysis['volume_ratio']
+        surge_type = analysis['surge_type']
+        price_change = analysis['price_change_pct']
+        alignment = analysis['volume_alignment']
+        risk = analysis['risk_assessment']
+        price = analysis['current_price']
+        
+        # Choose emoji based on surge type and alignment
+        if surge_type == "MEGA":
+            emoji = "🚨"
+        elif surge_type == "EXTREME":
+            emoji = "⚠️"
+        elif alignment in ["BULLISH_BREAKOUT", "BULLISH_INTEREST"]:
+            emoji = "🟢"
+        elif alignment in ["BEARISH_BREAKDOWN", "BEARISH_PRESSURE"]:
+            emoji = "🔴"
+        else:
+            emoji = "🟡"
+            
+        alert = f"{emoji} <b>VOLUME SURGE ALERT</b>\n\n"
+        alert += f"💎 Symbol: <b>{symbol}</b>\n"
+        alert += f"📊 Price: ${price:.6f if price < 1 else price:.4f if price < 100 else price:.2f} ({price_change:+.2f}%)\n"
+        alert += f"📈 Volume: <b>{volume_ratio:.1f}x</b> average ({surge_type})\n"
+        alert += f"🎯 Pattern: {alignment.replace('_', ' ')}\n"
+        alert += f"⚠️ Risk Level: <b>{risk.replace('_', ' ')}</b>\n\n"
+        
+        # Add interpretation based on volume alignment
+        if alignment == "BULLISH_BREAKOUT":
+            alert += "🚀 <i>Strong buying pressure - potential breakout</i>\n"
+            alert += "👀 <i>Watch for continuation or rejection</i>"
+        elif alignment == "BEARISH_BREAKDOWN":
+            alert += "📉 <i>Heavy selling pressure - potential breakdown</i>\n"
+            alert += "⚠️ <i>Consider risk management</i>"
+        elif alignment == "ACCUMULATION":
+            alert += "🤔 <i>Huge volume, minimal price change</i>\n"
+            alert += "📡 <i>Possible news, whale activity, or manipulation</i>"
+        elif alignment == "BULLISH_INTEREST":
+            alert += "📈 <i>Increased buying interest emerging</i>\n"
+            alert += "👁️ <i>Monitor for potential breakout setup</i>"
+        else:
+            alert += "📊 <i>Unusual activity detected</i>\n"
+            alert += "🔍 <i>Investigate for potential catalysts</i>"
+            
+        return alert
+        
+    def store_surge(self, analysis: Dict):
+        """Store volume surge in database"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            cursor.execute('''
+                INSERT INTO volume_surges (
+                    symbol, volume_ratio, surge_type, price_change_pct,
+                    volume_alignment, risk_assessment, alert_sent
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                analysis['symbol'],
+                analysis['volume_ratio'],
+                analysis['surge_type'],
+                analysis['price_change_pct'],
+                analysis['volume_alignment'],
+                analysis['risk_assessment'],
+                1  # alert_sent = True
+            ))
+            
+            conn.commit()
+            conn.close()
+            logger.info(f"Volume surge stored for {analysis['symbol']}")
+            
+        except Exception as e:
+            logger.error(f"Failed to store volume surge: {e}")
+
+
 class OrderBookAnalyzer:
     """Order book analysis component"""
 
@@ -631,9 +830,11 @@ class EnhancedTelegramBot:
 
         self.orderbook_analyzer = OrderBookAnalyzer()
         self.dominance_analyzer = USDTDominanceAnalyzer()
+        self.volume_analyzer = VolumeSurgeAnalyzer()
         self.last_macd_hist = None
         self.last_vwap_price = None
         self.dominance_running = False
+        self.volume_surge_running = False
         self.last_dominance_sentiment = None
 
     def get_ohlcv(self, symbol, timeframe='1h', limit=50):
@@ -1011,6 +1212,47 @@ class EnhancedTelegramBot:
                 
             await asyncio.sleep(7200)  # 2 hours
 
+    async def volume_surge_monitor(self):
+        """Monitor all symbols for volume surges every 30 minutes"""
+        while self.volume_surge_running:
+            try:
+                logger.info("Scanning all symbols for volume surges...")
+                surge_count = 0
+                
+                for symbol in self.symbols:
+                    try:
+                        # Get OHLCV data for volume analysis
+                        df = self.get_ohlcv(symbol, timeframe='1h', limit=50)
+                        if df is None or len(df) < 21:
+                            continue
+                            
+                        # Analyze for volume surge
+                        surge_analysis = self.volume_analyzer.analyze_volume_surge(symbol, df)
+                        
+                        if surge_analysis:
+                            # Generate and send alert
+                            alert = self.volume_analyzer.generate_volume_alert(surge_analysis)
+                            await self.send_alert(alert)
+                            
+                            # Store in database
+                            self.volume_analyzer.store_surge(surge_analysis)
+                            
+                            surge_count += 1
+                            logger.info(f"Volume surge detected for {symbol}: {surge_analysis['volume_ratio']:.1f}x")
+                            
+                    except Exception as e:
+                        logger.error(f"Error analyzing volume for {symbol}: {e}")
+                        
+                if surge_count > 0:
+                    logger.info(f"Volume surge monitoring completed: {surge_count} alerts sent")
+                else:
+                    logger.info("Volume surge monitoring completed: No significant surges detected")
+                    
+            except Exception as e:
+                logger.error(f"Volume surge monitoring error: {e}")
+                
+            await asyncio.sleep(1800)  # 30 minutes
+
     def get_current_market_sentiment(self) -> Optional[str]:
         """Get current market sentiment from USDT dominance"""
         try:
@@ -1031,6 +1273,7 @@ class EnhancedTelegramBot:
         self.running = True
         self.orderbook_running = True
         self.dominance_running = True
+        self.volume_surge_running = True
         
         logger.info("Starting enhanced monitoring...")
         
@@ -1046,16 +1289,21 @@ class EnhancedTelegramBot:
         dominance_task = asyncio.create_task(self.dominance_monitor())
         logger.info("USDT dominance monitoring started")
         
+        # Start volume surge monitoring task
+        volume_task = asyncio.create_task(self.volume_surge_monitor())
+        logger.info("Volume surge monitoring started")
+        
         # Send startup notification
         await self.send_alert(
             "🤖 <b>Enhanced Crypto Bot Started</b>\n\n"
             "🚀 Breakout monitoring: ACTIVE\n"
             "📊 Order book analysis: ACTIVE\n"
-            "🎯 USDT.D sentiment: ACTIVE\n\n"
+            "🎯 USDT.D sentiment: ACTIVE\n"
+            "📈 Volume surge alerts: ACTIVE\n\n"
             f"Monitoring {len(self.symbols)} symbols"
         )
         
-        return breakout_task, orderbook_task, dominance_task
+        return breakout_task, orderbook_task, dominance_task, volume_task
 
     async def breakout_monitor(self):
         """Monitor breakouts at candle close"""
@@ -1085,6 +1333,7 @@ class EnhancedTelegramBot:
         self.running = False
         self.orderbook_running = False
         self.dominance_running = False
+        self.volume_surge_running = False
 
 
 # Bot command handlers
@@ -1095,7 +1344,9 @@ async def start_command(update, context: ContextTypes.DEFAULT_TYPE):
         "🤖 <b>Enhanced Crypto Bot</b>\n\n"
         "Features:\n"
         "🚀 Breakout alerts for 19 symbols\n"
-        "📊 BTC order book analysis every 30min\n"
+        "📊 Order book analysis every 30min\n"
+        "🎯 USDT.D macro sentiment monitoring\n"
+        "📈 Volume surge early warning alerts\n"
         "\nCommands:\n"
         "/start - Show this message\n"
         "/status - Check bot status\n"
@@ -1104,6 +1355,7 @@ async def start_command(update, context: ContextTypes.DEFAULT_TYPE):
         "/analyze SYMBOL - Analyze order book for specific symbol\n"
         "/analyze all - Analyze all 19 watchlist symbols\n"
         "/dominance - Check USDT dominance sentiment\n"
+        "/volume - Scan for current volume surges\n"
         "/stop - Stop monitoring",
         parse_mode='HTML'
     )
@@ -1115,11 +1367,13 @@ async def status_command(update, context: ContextTypes.DEFAULT_TYPE):
         breakout_status = "🟢 Running" if bot_instance.running else "🔴 Stopped"
         orderbook_status = "🟢 Running" if bot_instance.orderbook_running else "🔴 Stopped"
         dominance_status = "🟢 Running" if bot_instance.dominance_running else "🔴 Stopped"
+        volume_status = "🟢 Running" if bot_instance.volume_surge_running else "🔴 Stopped"
         await update.message.reply_text(
             f"<b>Bot Status:</b>\n"
             f"🚀 Breakouts: {breakout_status}\n"
             f"📊 Order Book: {orderbook_status}\n"
-            f"🎯 USDT.D Sentiment: {dominance_status}",
+            f"🎯 USDT.D Sentiment: {dominance_status}\n"
+            f"📈 Volume Surges: {volume_status}",
             parse_mode='HTML'
         )
     else:
@@ -1133,7 +1387,8 @@ async def symbols_command(update, context: ContextTypes.DEFAULT_TYPE):
         f"<b>Monitored Symbols ({len(symbols)}):</b>\n{symbol_list}\n\n"
         f"<b>Additional Monitoring:</b>\n"
         f"• Order Book: BTC/USDT (every 30min)\n"
-        f"• USDT.D Sentiment: Global (every 2h)",
+        f"• USDT.D Sentiment: Global (every 2h)\n"
+        f"• Volume Surges: All symbols (every 30min)",
         parse_mode='HTML'
     )
 
@@ -1261,6 +1516,60 @@ async def dominance_command(update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"❌ Error analyzing dominance: {str(e)[:100]}", parse_mode='HTML')
 
+async def volume_command(update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /volume command - check volume surges across watchlist"""
+    bot_instance = context.bot_data.get('bot_instance')
+    if not bot_instance:
+        await update.message.reply_text("❌ Bot not initialized", parse_mode='HTML')
+        return
+        
+    await update.message.reply_text("📈 Scanning for volume surges...", parse_mode='HTML')
+    
+    try:
+        surges_found = []
+        
+        for symbol in bot_instance.symbols:
+            try:
+                df = bot_instance.get_ohlcv(symbol, timeframe='1h', limit=50)
+                if df is None or len(df) < 21:
+                    continue
+                    
+                surge_analysis = bot_instance.volume_analyzer.analyze_volume_surge(symbol, df)
+                
+                if surge_analysis:
+                    surges_found.append({
+                        'symbol': symbol,
+                        'volume_ratio': surge_analysis['volume_ratio'],
+                        'surge_type': surge_analysis['surge_type'],
+                        'price_change': surge_analysis['price_change_pct'],
+                        'alignment': surge_analysis['volume_alignment'],
+                        'risk': surge_analysis['risk_assessment']
+                    })
+                    
+            except Exception as e:
+                logger.error(f"Error checking volume for {symbol}: {e}")
+                
+        if surges_found:
+            # Sort by volume ratio (highest first)
+            surges_found.sort(key=lambda x: x['volume_ratio'], reverse=True)
+            
+            message = "📈 <b>Current Volume Surges</b>\n\n"
+            for surge in surges_found[:10]:  # Show top 10
+                emoji = "🚨" if surge['surge_type'] == "MEGA" else "⚠️" if surge['surge_type'] == "EXTREME" else "🟡"
+                message += f"{emoji} <b>{surge['symbol']}</b>: {surge['volume_ratio']:.1f}x ({surge['surge_type']})\n"
+                message += f"   Price: {surge['price_change']:+.2f}% | {surge['alignment'].replace('_', ' ')}\n\n"
+                
+            if len(surges_found) > 10:
+                message += f"<i>...and {len(surges_found) - 10} more</i>"
+                
+        else:
+            message = "📊 <b>Volume Scan Complete</b>\n\n✅ No significant volume surges detected across watchlist"
+            
+        await update.message.reply_text(message, parse_mode='HTML')
+        
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error scanning volumes: {str(e)[:100]}", parse_mode='HTML')
+
 async def stop_command(update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /stop command"""
     bot_instance = context.bot_data.get('bot_instance')
@@ -1289,6 +1598,7 @@ def main():
     application.add_handler(CommandHandler("orderbook", orderbook_command))
     application.add_handler(CommandHandler("analyze", analyze_command))
     application.add_handler(CommandHandler("dominance", dominance_command))
+    application.add_handler(CommandHandler("volume", volume_command))
     application.add_handler(CommandHandler("stop", stop_command))
 
     application.bot_data['bot_instance'] = bot
