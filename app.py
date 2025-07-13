@@ -602,10 +602,25 @@ Volume spike detected! 📊
                     if div_signal:
                         timestamp = datetime.now().strftime("%H:%M:%S")
                         direction_emoji = "🚀" if div_signal == "BULLISH" else "📉"
+                        # Calculate SL/TP for divergence
+                        price = curr['close']
+                        if div_signal == 'BULLISH':
+                            base_level = prev['low']
+                            sl = base_level * (1 - 0.01)   # 1% below recent low
+                        else:
+                            base_level = prev['high']
+                            sl = base_level * (1 + 0.01)   # 1% above recent high
+                        # TP at 2:1 RR
+                        if div_signal == 'BULLISH':
+                            tp = price + (price - sl) * 2
+                        else:
+                            tp = price - (sl - price) * 2
                         message = f"""{direction_emoji} <b>{div_signal} RSI Divergence</b>
 
 <b>Symbol:</b> {symbol}
-<b>Price:</b> ${df['close'].iloc[-1]:.4f}
+<b>Price:</b> ${price:.4f}
+<b>SL:</b> ${sl:.4f}
+<b>TP:</b> ${tp:.4f}
 <b>Time:</b> {timestamp}
 """
                         await self.send_alert(message)
