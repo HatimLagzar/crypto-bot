@@ -448,6 +448,20 @@ class EnhancedTelegramBot:
         df['volume_avg'] = df['volume'].rolling(20).mean()
         df['resistance'] = df['high'].rolling(self.lookback).max()
         df['support'] = df['low'].rolling(self.lookback).min()
+
+        # EMA crossovers
+        df['ema9'] = df['close'].ewm(span=9, adjust=False).mean()
+        df['ema21'] = df['close'].ewm(span=21, adjust=False).mean()
+
+        # 14-period RSI calculation
+        delta = df['close'].diff()
+        gain = delta.where(delta > 0, 0)
+        loss = -delta.where(delta < 0, 0)
+        avg_gain = gain.rolling(window=14).mean()
+        avg_loss = loss.rolling(window=14).mean()
+        rs = avg_gain / avg_loss
+        df['rsi'] = 100 - (100 / (1 + rs))
+
         return df
     
     def check_breakout(self, df):
@@ -513,6 +527,50 @@ Volume spike detected! 📊
                     
                     await self.send_alert(message)
                     alerts_sent.append(f"{symbol} {signal}")
+
+                # EMA crossover detection
+                if len(df) >= 2:
+                    prev_ema9, prev_ema21 = df['ema9'].iloc[-2], df['ema21'].iloc[-2]
+                    curr_ema9, curr_ema21 = df['ema9'].iloc[-1], df['ema21'].iloc[-1]
+                    if prev_ema9 < prev_ema21 and curr_ema9 > curr_ema21:
+                        ema_signal = 'BULLISH'
+                    elif prev_ema9 > prev_ema21 and curr_ema9 < curr_ema21:
+                        ema_signal = 'BEARISH'
+                    else:
+                        ema_signal = None
+                    if ema_signal:
+                        timestamp = datetime.now().strftime("%H:%M:%S")
+                        direction_emoji = "🚀" if ema_signal == "BULLISH" else "📉"
+                        message = f"""{direction_emoji} <b>{ema_signal} EMA Crossover</b>
+
+<b>Symbol:</b> {symbol}
+<b>Price:</b> ${df['close'].iloc[-1]:.4f}
+<b>Time:</b> {timestamp}
+"""
+                        await self.send_alert(message)
+                        alerts_sent.append(f"{symbol} EMA_Crossover_{ema_signal}")
+
+                # RSI divergence detection
+                if len(df) >= 2 and 'rsi' in df:
+                    prev = df.iloc[-2]
+                    curr = df.iloc[-1]
+                    if curr['low'] < prev['low'] and curr['rsi'] > prev['rsi']:
+                        div_signal = 'BULLISH'
+                    elif curr['high'] > prev['high'] and curr['rsi'] < prev['rsi']:
+                        div_signal = 'BEARISH'
+                    else:
+                        div_signal = None
+                    if div_signal:
+                        timestamp = datetime.now().strftime("%H:%M:%S")
+                        direction_emoji = "🚀" if div_signal == "BULLISH" else "📉"
+                        message = f"""{direction_emoji} <b>{div_signal} RSI Divergence</b>
+
+<b>Symbol:</b> {symbol}
+<b>Price:</b> ${df['close'].iloc[-1]:.4f}
+<b>Time:</b> {timestamp}
+"""
+                        await self.send_alert(message)
+                        alerts_sent.append(f"{symbol} RSI_Divergence_{div_signal}")
                     
             except Exception as e:
                 logger.error(f"Error scanning {symbol}: {e}")
