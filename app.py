@@ -1585,31 +1585,6 @@ class EnhancedTelegramBot:
         self.last_dominance_sentiment = None
 
         application = Application.builder().token(bot_token).build()
-        application.add_handler(CommandHandler('deepestwalls', self.deepest_walls_command))
-    async def deepest_walls_command(self, update: ContextTypes.DEFAULT_TYPE, context: ContextTypes.DEFAULT_TYPE):
-        """Handle /deepestwalls: show top bid/ask walls by size for each watchlist symbol."""
-        messages = []
-        for symbol in self.symbols:
-            data = self.orderbook_analyzer.get_deepest_walls(symbol)
-            if not data:
-                continue
-            price = data['current_price']
-            text = [f"🔥 {symbol} (${price:.4f}):"]
-            # Format top bids
-            text.append("🟢 Top Bid Walls:")
-            for wall in data['bids']:
-                dist = (price - wall['price']) / price * 100
-                text.append(f"  • ${wall['price']:.4f} – qty {wall['quantity']:.0f} – {dist:.2f}% below")
-            # Format top asks
-            text.append("🔴 Top Ask Walls:")
-            for wall in data['asks']:
-                dist = (wall['price'] - price) / price * 100
-                text.append(f"  • ${wall['price']:.4f} – qty {wall['quantity']:.0f} – {dist:.2f}% above")
-            messages.append("\n".join(text))
-        if not messages:
-            await context.bot.send_message(chat_id=self.chat_id, text="No deep walls found.")
-        else:
-            await context.bot.send_message(chat_id=self.chat_id, text="\n\n".join(messages), parse_mode='HTML')
 
     def get_ohlcv(self, symbol, timeframe='1h', limit=50):
         """Fetch OHLCV data"""
@@ -2492,7 +2467,7 @@ async def setups_command(update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Error scanning setups: {str(e)[:100]}", parse_mode='HTML')
 
 async def entry_command(update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /entry command - analyze optimal entry prices"""
+    """Handle /entry command - show deepest walls for entry analysis"""
     bot_instance = context.bot_data.get('bot_instance')
     if not bot_instance:
         await update.message.reply_text("❌ Bot not initialized", parse_mode='HTML')
@@ -2505,67 +2480,33 @@ async def entry_command(update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # Handle /entry all command
+    # Handle /entry all command  
     if args[0].lower() == 'all':
-        await update.message.reply_text("🎯 Analyzing entry opportunities for all watchlist symbols...", parse_mode='HTML')
+        await update.message.reply_text("🔍 Analyzing deepest walls for all watchlist symbols...", parse_mode='HTML')
         
-        all_entries = []
+        messages = []
         for symbol in bot_instance.symbols:
-            try:
-                entry_analysis = bot_instance.orderbook_analyzer.calculate_entry_opportunities(symbol)
-                if entry_analysis and (entry_analysis['long_entries'] or entry_analysis['short_entries']):
-                    all_entries.append(entry_analysis)
-            except Exception as e:
-                logger.error(f"Error calculating entries for {symbol}: {e}")
+            data = bot_instance.orderbook_analyzer.get_deepest_walls(symbol)
+            if not data:
+                continue
+            price = data['current_price']
+            text = [f"🔥 {symbol} (${price:.4f}):"]
+            # Format top bids
+            text.append("🟢 Top Bid Walls:")
+            for wall in data['bids']:
+                dist = (price - wall['price']) / price * 100
+                text.append(f"  • ${wall['price']:.4f} – qty {wall['quantity']:.0f} – {dist:.2f}% below")
+            # Format top asks
+            text.append("🔴 Top Ask Walls:")
+            for wall in data['asks']:
+                dist = (wall['price'] - price) / price * 100
+                text.append(f"  • ${wall['price']:.4f} – qty {wall['quantity']:.0f} – {dist:.2f}% above")
+            messages.append("\n".join(text))
         
-        if all_entries:
-            # Sort by best opportunities (highest confidence + score)
-            def sort_key(entry):
-                best_score = 0
-                if entry['long_entries']:
-                    best_score = max(best_score, entry['long_entries'][0]['score'])
-                if entry['short_entries']:
-                    best_score = max(best_score, entry['short_entries'][0]['score'])
-                confidence_bonus = 0.1 if entry['confidence'] == 'HIGH' else 0.05 if entry['confidence'] == 'MEDIUM' else 0
-                return best_score + confidence_bonus
-            
-            all_entries.sort(key=sort_key, reverse=True)
-            
-            message = "🎯 <b>Best Entry Opportunities</b>\n\n"
-            
-            for entry_data in all_entries[:8]:  # Show top 8
-                symbol = entry_data['symbol']
-                current_price = entry_data['current_price']
-                confidence = entry_data['confidence']
-                
-                # Format price with appropriate decimals
-                decimals = 6 if current_price < 1 else 4 if current_price < 100 else 2
-                
-                confidence_emoji = "🔥" if confidence == 'HIGH' else "⭐" if confidence == 'MEDIUM' else "⚪"
-                
-                message += f"{confidence_emoji} <b>{symbol}</b> (${current_price:.{decimals}f})\n"
-                
-                # Show best long entry if available
-                if entry_data['long_entries']:
-                    best_long = entry_data['long_entries'][0]
-                    message += f"🟢 LONG: ${best_long['price']:.{decimals}f} ({best_long['distance_pct']:.1f}%) - {best_long['type']}\n"
-                
-                # Show best short entry if available
-                if entry_data['short_entries']:
-                    best_short = entry_data['short_entries'][0]
-                    message += f"🔴 SHORT: ${best_short['price']:.{decimals}f} ({best_short['distance_pct']:.1f}%) - {best_short['type']}\n"
-                
-                message += "\n"
-            
-            if len(all_entries) > 8:
-                message += f"<i>...and {len(all_entries) - 8} more opportunities</i>\n\n"
-            
-            message += "💡 Use /entry SYMBOL for detailed analysis"
-            
+        if not messages:
+            await update.message.reply_text("No deep walls found.", parse_mode='HTML')
         else:
-            message = "🎯 <b>Entry Analysis Complete</b>\n\n📊 No clear entry opportunities found at current market conditions."
-        
-        await update.message.reply_text(message, parse_mode='HTML')
+            await update.message.reply_text("\n\n".join(messages), parse_mode='HTML')
         return
 
     # Single symbol analysis
@@ -2573,70 +2514,36 @@ async def entry_command(update, context: ContextTypes.DEFAULT_TYPE):
     if '/' not in symbol:
         symbol += '/USDT'
     
-    await update.message.reply_text(f"🎯 Analyzing entry opportunities for {symbol}...", parse_mode='HTML')
+    await update.message.reply_text(f"🔍 Analyzing deepest walls for {symbol}...", parse_mode='HTML')
     
     try:
-        entry_analysis = bot_instance.orderbook_analyzer.calculate_entry_opportunities(symbol)
+        data = bot_instance.orderbook_analyzer.get_deepest_walls(symbol)
         
-        if not entry_analysis:
+        if not data:
             await update.message.reply_text(f"❌ Unable to fetch order book data for {symbol}", parse_mode='HTML')
             return
         
-        # Generate detailed report
-        current_price = entry_analysis['current_price']
-        spread_bps = entry_analysis['spread_bps']
-        confidence = entry_analysis['confidence']
-        pressure = entry_analysis['market_pressure']
+        price = data['current_price']
+        message = f"🔥 <b>{symbol}</b> (${price:.4f})\n\n"
         
-        # Format price with appropriate decimals
-        decimals = 6 if current_price < 1 else 4 if current_price < 100 else 2
+        # Format top bids
+        message += "🟢 <b>Top Bid Walls:</b>\n"
+        for wall in data['bids']:
+            dist = (price - wall['price']) / price * 100
+            message += f"  • ${wall['price']:.4f} – qty {wall['quantity']:.0f} – {dist:.2f}% below\n"
         
-        confidence_emoji = "🔥" if confidence == 'HIGH' else "⭐" if confidence == 'MEDIUM' else "⚪"
+        message += "\n"
         
-        message = f"🎯 <b>Entry Analysis: {symbol}</b>\n\n"
-        message += f"💰 Current Price: ${current_price:.{decimals}f}\n"
-        message += f"📊 Spread: {spread_bps:.1f} bps\n"
-        message += f"{confidence_emoji} Confidence: {confidence}\n\n"
-        
-        # Market pressure
-        if 'immediate_imbalance' in pressure:
-            imbalance = pressure['immediate_imbalance']
-            if abs(imbalance) > 0.2:
-                direction = "BULLISH" if imbalance > 0 else "BEARISH"
-                message += f"⚡ Pressure: <b>{direction}</b> ({imbalance:.1%})\n\n"
-            else:
-                message += f"⚖️ Pressure: BALANCED ({imbalance:.1%})\n\n"
-        
-        # Long entries
-        if entry_analysis['long_entries']:
-            message += "🟢 <b>LONG OPPORTUNITIES</b>\n"
-            for i, entry in enumerate(entry_analysis['long_entries'][:3]):  # Top 3
-                entry_emoji = "🚀" if entry['type'] == 'BREAKOUT' else "🎯" if entry['type'] == 'SUPPORT_BOUNCE' else "⚡"
-                conf_emoji = "🔥" if entry['confidence'] == 'HIGH' else "⭐"
-                
-                message += f"{entry_emoji} ${entry['price']:.{decimals}f} ({entry['distance_pct']:.1f}%) {conf_emoji}\n"
-                message += f"   {entry['reasoning']}\n"
-                message += f"   Score: {entry['score']:.1f}/1.0\n\n"
-        
-        # Short entries
-        if entry_analysis['short_entries']:
-            message += "🔴 <b>SHORT OPPORTUNITIES</b>\n"
-            for i, entry in enumerate(entry_analysis['short_entries'][:3]):  # Top 3
-                entry_emoji = "🚀" if entry['type'] == 'BREAKOUT' else "🎯" if entry['type'] == 'RESISTANCE_REJECT' else "⚡"
-                conf_emoji = "🔥" if entry['confidence'] == 'HIGH' else "⭐"
-                
-                message += f"{entry_emoji} ${entry['price']:.{decimals}f} ({entry['distance_pct']:.1f}%) {conf_emoji}\n"
-                message += f"   {entry['reasoning']}\n"
-                message += f"   Score: {entry['score']:.1f}/1.0\n\n"
-        
-        if not entry_analysis['long_entries'] and not entry_analysis['short_entries']:
-            message += "📊 No clear entry opportunities found at current market conditions.\n"
-            message += "Consider waiting for better order book setup."
+        # Format top asks  
+        message += "🔴 <b>Top Ask Walls:</b>\n"
+        for wall in data['asks']:
+            dist = (wall['price'] - price) / price * 100
+            message += f"  • ${wall['price']:.4f} – qty {wall['quantity']:.0f} – {dist:.2f}% above\n"
         
         await update.message.reply_text(message, parse_mode='HTML')
         
     except Exception as e:
-        await update.message.reply_text(f"❌ Error analyzing entries for {symbol}: {str(e)[:100]}", parse_mode='HTML')
+        await update.message.reply_text(f"❌ Error analyzing deepest walls for {symbol}: {str(e)[:100]}", parse_mode='HTML')
 
 async def stop_command(update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /stop command"""
