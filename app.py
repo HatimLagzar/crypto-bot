@@ -250,7 +250,7 @@ class VolumeSurgeAnalyzer:
         
         # Volume surge thresholds
         self.thresholds = {
-            'notable': 3.0,      # 3x average volume
+            'notable': 2.5,      # 2.5x average volume
             'significant': 5.0,   # 5x average volume  
             'extreme': 10.0,      # 10x average volume
             'mega': 20.0         # 20x average volume (very rare)
