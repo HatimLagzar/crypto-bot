@@ -1030,6 +1030,162 @@ class OrderBookAnalyzer:
             logger.error(f"Error fetching order book for {symbol}: {e}")
             return None
 
+    def calculate_entry_opportunities(self, symbol: str) -> Dict:
+        """Calculate optimal entry prices for a symbol based on order book analysis"""
+        order_book_data = self.get_order_book_data(symbol)
+        if not order_book_data:
+            return None
+            
+        bids = order_book_data['bids']
+        asks = order_book_data['asks']
+        mid_price = order_book_data['mid_price']
+        spread_bps = order_book_data['spread_bps']
+        
+        # Calculate market pressure
+        pressure = self.calculate_market_pressure(bids, asks, mid_price)
+        
+        # Find significant support/resistance levels
+        significant_levels = self.identify_significant_levels(bids, asks, mid_price)
+        
+        # Calculate entry opportunities
+        entries = {
+            'symbol': symbol,
+            'current_price': mid_price,
+            'spread_bps': spread_bps,
+            'long_entries': [],
+            'short_entries': [],
+            'market_pressure': pressure,
+            'confidence': 'LOW'
+        }
+        
+        # LONG ENTRY OPPORTUNITIES
+        
+        # 1. Support level entries (buy near strong bid walls)
+        for level in significant_levels['support_levels']:
+            if level['price'] < mid_price:  # Only below current price
+                entry_score = self._calculate_entry_score(level, pressure, 'LONG')
+                if entry_score > 0.5:  # Minimum threshold
+                    entries['long_entries'].append({
+                        'type': 'SUPPORT_BOUNCE',
+                        'price': level['price'],
+                        'size': level['size'],
+                        'distance_pct': ((mid_price - level['price']) / mid_price) * 100,
+                        'score': entry_score,
+                        'confidence': 'HIGH' if entry_score > 0.7 else 'MEDIUM',
+                        'reasoning': f"Strong support wall ({level['size']:.0f} USDT) at {level['price']:.4f}"
+                    })
+        
+        # 2. Pressure-based entries (buy when selling pressure exhausted)
+        if pressure.get('immediate_imbalance', 0) < -0.2:  # Strong selling pressure
+            # Look for entry slightly below current price
+            entry_price = mid_price * 0.998  # 0.2% below mid
+            bid_support = sum(qty for price, qty in bids if price >= entry_price * 0.995)
+            if bid_support > 10000:  # Decent support
+                entries['long_entries'].append({
+                    'type': 'PRESSURE_REVERSAL',
+                    'price': entry_price,
+                    'size': bid_support,
+                    'distance_pct': 0.2,
+                    'score': 0.6,
+                    'confidence': 'MEDIUM',
+                    'reasoning': f"Oversold pressure ({pressure['immediate_imbalance']:.1%}) with support"
+                })
+        
+        # 3. Breakout entries (buy above resistance if pressure builds)
+        if pressure.get('immediate_imbalance', 0) > 0.15:  # Building buying pressure
+            for level in significant_levels['resistance_levels']:
+                if level['price'] > mid_price and level['price'] < mid_price * 1.02:  # Within 2%
+                    breakout_price = level['price'] * 1.001  # Just above resistance
+                    entry_score = 0.65 + (pressure.get('immediate_imbalance', 0) * 0.5)
+                    entries['long_entries'].append({
+                        'type': 'BREAKOUT',
+                        'price': breakout_price,
+                        'size': level['size'],
+                        'distance_pct': ((breakout_price - mid_price) / mid_price) * 100,
+                        'score': min(entry_score, 0.9),
+                        'confidence': 'HIGH' if entry_score > 0.75 else 'MEDIUM',
+                        'reasoning': f"Breakout above {level['price']:.4f} with buying pressure"
+                    })
+        
+        # SHORT ENTRY OPPORTUNITIES
+        
+        # 1. Resistance level entries (sell near strong ask walls)
+        for level in significant_levels['resistance_levels']:
+            if level['price'] > mid_price:  # Only above current price
+                entry_score = self._calculate_entry_score(level, pressure, 'SHORT')
+                if entry_score > 0.5:
+                    entries['short_entries'].append({
+                        'type': 'RESISTANCE_REJECT',
+                        'price': level['price'],
+                        'size': level['size'],
+                        'distance_pct': ((level['price'] - mid_price) / mid_price) * 100,
+                        'score': entry_score,
+                        'confidence': 'HIGH' if entry_score > 0.7 else 'MEDIUM',
+                        'reasoning': f"Strong resistance wall ({level['size']:.0f} USDT) at {level['price']:.4f}"
+                    })
+        
+        # 2. Pressure-based short entries
+        if pressure.get('immediate_imbalance', 0) > 0.2:  # Strong buying pressure (potentially exhausted)
+            entry_price = mid_price * 1.002  # 0.2% above mid
+            ask_resistance = sum(qty for price, qty in asks if price <= entry_price * 1.005)
+            if ask_resistance > 10000:
+                entries['short_entries'].append({
+                    'type': 'PRESSURE_REVERSAL',
+                    'price': entry_price,
+                    'size': ask_resistance,
+                    'distance_pct': 0.2,
+                    'score': 0.6,
+                    'confidence': 'MEDIUM',
+                    'reasoning': f"Overbought pressure ({pressure['immediate_imbalance']:.1%}) with resistance"
+                })
+        
+        # Sort entries by score
+        entries['long_entries'].sort(key=lambda x: x['score'], reverse=True)
+        entries['short_entries'].sort(key=lambda x: x['score'], reverse=True)
+        
+        # Overall confidence based on best opportunities
+        best_scores = []
+        if entries['long_entries']:
+            best_scores.append(entries['long_entries'][0]['score'])
+        if entries['short_entries']:
+            best_scores.append(entries['short_entries'][0]['score'])
+        
+        if best_scores:
+            max_score = max(best_scores)
+            if max_score > 0.75:
+                entries['confidence'] = 'HIGH'
+            elif max_score > 0.6:
+                entries['confidence'] = 'MEDIUM'
+            else:
+                entries['confidence'] = 'LOW'
+        
+        return entries
+    
+    def _calculate_entry_score(self, level: Dict, pressure: Dict, direction: str) -> float:
+        """Calculate entry score for a specific level"""
+        base_score = 0.5
+        
+        # Size factor (larger walls = better)
+        size_factor = min(level['size'] / 50000, 0.3)  # Max 0.3 bonus for 50k+ walls
+        
+        # Pressure alignment
+        pressure_bonus = 0
+        if direction == 'LONG':
+            # For longs, we want selling pressure to be exhausted (negative imbalance)
+            if pressure.get('immediate_imbalance', 0) < 0:
+                pressure_bonus = abs(pressure['immediate_imbalance']) * 0.2
+        else:
+            # For shorts, we want buying pressure to be exhausted (positive imbalance)
+            if pressure.get('immediate_imbalance', 0) > 0:
+                pressure_bonus = pressure['immediate_imbalance'] * 0.2
+        
+        # Distance factor (closer to current price = better for support/resistance)
+        distance_pct = level.get('distance_pct', 5)
+        distance_penalty = min(distance_pct / 100, 0.1)  # Max 0.1 penalty
+        
+        score = base_score + size_factor + pressure_bonus - distance_penalty
+        return max(0, min(score, 1.0))  # Clamp between 0 and 1
+
     def calculate_market_pressure(self, bids: List[List[float]], asks: List[List[float]], mid_price: float) -> Dict:
         """Calculate various market pressure metrics"""
         pressure = {}
@@ -1095,6 +1251,66 @@ class OrderBookAnalyzer:
             'significant_asks': significant_asks[:5],
             'large_bid_walls': len(significant_bids),
             'large_ask_walls': len(significant_asks)
+        }
+
+    def identify_significant_levels(self, bids: List[List[float]], asks: List[List[float]], mid_price: float) -> Dict:
+        """Identify significant support and resistance levels for entry analysis"""
+        bid_sizes = [qty for _, qty in bids[:100]]
+        ask_sizes = [qty for _, qty in asks[:100]]
+        avg_bid_size = statistics.mean(bid_sizes) if bid_sizes else 0
+        avg_ask_size = statistics.mean(ask_sizes) if ask_sizes else 0
+        
+        # Use a lower threshold for entry analysis to find more levels
+        support_threshold = avg_bid_size * 3  # 3x average instead of 10x
+        resistance_threshold = avg_ask_size * 3
+        
+        support_levels = []
+        resistance_levels = []
+        
+        # Find support levels (strong bid walls)
+        for price, qty in bids:
+            if qty >= support_threshold:
+                # Calculate dollar size for better comparison
+                dollar_size = price * qty
+                if dollar_size >= 5000:  # Minimum $5k wall
+                    distance_pct = ((mid_price - price) / mid_price) * 100
+                    if distance_pct <= 5:  # Within 5% of current price
+                        support_levels.append({
+                            'price': price,
+                            'size': dollar_size,
+                            'quantity': qty,
+                            'distance_pct': distance_pct
+                        })
+        
+        # Find resistance levels (strong ask walls)
+        for price, qty in asks:
+            if qty >= resistance_threshold:
+                dollar_size = price * qty
+                if dollar_size >= 5000:  # Minimum $5k wall
+                    distance_pct = ((price - mid_price) / mid_price) * 100
+                    if distance_pct <= 5:  # Within 5% of current price
+                        resistance_levels.append({
+                            'price': price,
+                            'size': dollar_size,
+                            'quantity': qty,
+                            'distance_pct': distance_pct
+                        })
+        
+        # Sort by distance from current price
+        support_levels.sort(key=lambda x: x['distance_pct'])
+        resistance_levels.sort(key=lambda x: x['distance_pct'])
+        
+        # Remove levels too close to each other (within 0.5%)
+        def filter_close_levels(levels):
+            filtered = []
+            for level in levels:
+                if not any(abs(level['distance_pct'] - existing['distance_pct']) < 0.5 for existing in filtered):
+                    filtered.append(level)
+            return filtered
+        
+        return {
+            'support_levels': filter_close_levels(support_levels)[:5],
+            'resistance_levels': filter_close_levels(resistance_levels)[:5]
         }
 
     def classify_market_sentiment(self, analysis: Dict) -> str:
@@ -1934,8 +2150,11 @@ async def start_command(update, context: ContextTypes.DEFAULT_TYPE):
         "/orderbook - Get instant BTC/USDT order book analysis\n"
         "/analyze SYMBOL - Analyze order book for specific symbol\n"
         "/analyze all - Analyze all 19 watchlist symbols\n"
+        "/entry SYMBOL - Get optimal entry prices for symbol\n"
+        "/entry all - Show best entry opportunities across watchlist\n"
         "/dominance - Check USDT dominance sentiment\n"
         "/volume - Scan for current volume surges\n"
+        "/setups - Scan for trading setups\n"
         "/stop - Stop monitoring",
         parse_mode='HTML'
     )
@@ -2227,6 +2446,153 @@ async def setups_command(update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"❌ Error scanning setups: {str(e)[:100]}", parse_mode='HTML')
 
+async def entry_command(update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /entry command - analyze optimal entry prices"""
+    bot_instance = context.bot_data.get('bot_instance')
+    if not bot_instance:
+        await update.message.reply_text("❌ Bot not initialized", parse_mode='HTML')
+        return
+
+    args = context.args
+    if not args:
+        await update.message.reply_text(
+            "Usage: /entry SYMBOL (e.g. BTC/USDT) or /entry all", parse_mode='HTML'
+        )
+        return
+
+    # Handle /entry all command
+    if args[0].lower() == 'all':
+        await update.message.reply_text("🎯 Analyzing entry opportunities for all watchlist symbols...", parse_mode='HTML')
+        
+        all_entries = []
+        for symbol in bot_instance.symbols:
+            try:
+                entry_analysis = bot_instance.orderbook_analyzer.calculate_entry_opportunities(symbol)
+                if entry_analysis and (entry_analysis['long_entries'] or entry_analysis['short_entries']):
+                    all_entries.append(entry_analysis)
+            except Exception as e:
+                logger.error(f"Error calculating entries for {symbol}: {e}")
+        
+        if all_entries:
+            # Sort by best opportunities (highest confidence + score)
+            def sort_key(entry):
+                best_score = 0
+                if entry['long_entries']:
+                    best_score = max(best_score, entry['long_entries'][0]['score'])
+                if entry['short_entries']:
+                    best_score = max(best_score, entry['short_entries'][0]['score'])
+                confidence_bonus = 0.1 if entry['confidence'] == 'HIGH' else 0.05 if entry['confidence'] == 'MEDIUM' else 0
+                return best_score + confidence_bonus
+            
+            all_entries.sort(key=sort_key, reverse=True)
+            
+            message = "🎯 <b>Best Entry Opportunities</b>\n\n"
+            
+            for entry_data in all_entries[:8]:  # Show top 8
+                symbol = entry_data['symbol']
+                current_price = entry_data['current_price']
+                confidence = entry_data['confidence']
+                
+                # Format price with appropriate decimals
+                decimals = 6 if current_price < 1 else 4 if current_price < 100 else 2
+                
+                confidence_emoji = "🔥" if confidence == 'HIGH' else "⭐" if confidence == 'MEDIUM' else "⚪"
+                
+                message += f"{confidence_emoji} <b>{symbol}</b> (${current_price:.{decimals}f})\n"
+                
+                # Show best long entry if available
+                if entry_data['long_entries']:
+                    best_long = entry_data['long_entries'][0]
+                    message += f"🟢 LONG: ${best_long['price']:.{decimals}f} ({best_long['distance_pct']:.1f}%) - {best_long['type']}\n"
+                
+                # Show best short entry if available
+                if entry_data['short_entries']:
+                    best_short = entry_data['short_entries'][0]
+                    message += f"🔴 SHORT: ${best_short['price']:.{decimals}f} ({best_short['distance_pct']:.1f}%) - {best_short['type']}\n"
+                
+                message += "\n"
+            
+            if len(all_entries) > 8:
+                message += f"<i>...and {len(all_entries) - 8} more opportunities</i>\n\n"
+            
+            message += "💡 Use /entry SYMBOL for detailed analysis"
+            
+        else:
+            message = "🎯 <b>Entry Analysis Complete</b>\n\n📊 No clear entry opportunities found at current market conditions."
+        
+        await update.message.reply_text(message, parse_mode='HTML')
+        return
+
+    # Single symbol analysis
+    symbol = args[0].upper()
+    if '/' not in symbol:
+        symbol += '/USDT'
+    
+    await update.message.reply_text(f"🎯 Analyzing entry opportunities for {symbol}...", parse_mode='HTML')
+    
+    try:
+        entry_analysis = bot_instance.orderbook_analyzer.calculate_entry_opportunities(symbol)
+        
+        if not entry_analysis:
+            await update.message.reply_text(f"❌ Unable to fetch order book data for {symbol}", parse_mode='HTML')
+            return
+        
+        # Generate detailed report
+        current_price = entry_analysis['current_price']
+        spread_bps = entry_analysis['spread_bps']
+        confidence = entry_analysis['confidence']
+        pressure = entry_analysis['market_pressure']
+        
+        # Format price with appropriate decimals
+        decimals = 6 if current_price < 1 else 4 if current_price < 100 else 2
+        
+        confidence_emoji = "🔥" if confidence == 'HIGH' else "⭐" if confidence == 'MEDIUM' else "⚪"
+        
+        message = f"🎯 <b>Entry Analysis: {symbol}</b>\n\n"
+        message += f"💰 Current Price: ${current_price:.{decimals}f}\n"
+        message += f"📊 Spread: {spread_bps:.1f} bps\n"
+        message += f"{confidence_emoji} Confidence: {confidence}\n\n"
+        
+        # Market pressure
+        if 'immediate_imbalance' in pressure:
+            imbalance = pressure['immediate_imbalance']
+            if abs(imbalance) > 0.2:
+                direction = "BULLISH" if imbalance > 0 else "BEARISH"
+                message += f"⚡ Pressure: <b>{direction}</b> ({imbalance:.1%})\n\n"
+            else:
+                message += f"⚖️ Pressure: BALANCED ({imbalance:.1%})\n\n"
+        
+        # Long entries
+        if entry_analysis['long_entries']:
+            message += "🟢 <b>LONG OPPORTUNITIES</b>\n"
+            for i, entry in enumerate(entry_analysis['long_entries'][:3]):  # Top 3
+                entry_emoji = "🚀" if entry['type'] == 'BREAKOUT' else "🎯" if entry['type'] == 'SUPPORT_BOUNCE' else "⚡"
+                conf_emoji = "🔥" if entry['confidence'] == 'HIGH' else "⭐"
+                
+                message += f"{entry_emoji} ${entry['price']:.{decimals}f} ({entry['distance_pct']:.1f}%) {conf_emoji}\n"
+                message += f"   {entry['reasoning']}\n"
+                message += f"   Score: {entry['score']:.1f}/1.0\n\n"
+        
+        # Short entries
+        if entry_analysis['short_entries']:
+            message += "🔴 <b>SHORT OPPORTUNITIES</b>\n"
+            for i, entry in enumerate(entry_analysis['short_entries'][:3]):  # Top 3
+                entry_emoji = "🚀" if entry['type'] == 'BREAKOUT' else "🎯" if entry['type'] == 'RESISTANCE_REJECT' else "⚡"
+                conf_emoji = "🔥" if entry['confidence'] == 'HIGH' else "⭐"
+                
+                message += f"{entry_emoji} ${entry['price']:.{decimals}f} ({entry['distance_pct']:.1f}%) {conf_emoji}\n"
+                message += f"   {entry['reasoning']}\n"
+                message += f"   Score: {entry['score']:.1f}/1.0\n\n"
+        
+        if not entry_analysis['long_entries'] and not entry_analysis['short_entries']:
+            message += "📊 No clear entry opportunities found at current market conditions.\n"
+            message += "Consider waiting for better order book setup."
+        
+        await update.message.reply_text(message, parse_mode='HTML')
+        
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error analyzing entries for {symbol}: {str(e)[:100]}", parse_mode='HTML')
+
 async def stop_command(update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /stop command"""
     bot_instance = context.bot_data.get('bot_instance')
@@ -2257,6 +2623,7 @@ def main():
     application.add_handler(CommandHandler("dominance", dominance_command))
     application.add_handler(CommandHandler("volume", volume_command))
     application.add_handler(CommandHandler("setups", setups_command))
+    application.add_handler(CommandHandler("entry", entry_command))
     application.add_handler(CommandHandler("stop", stop_command))
 
     application.bot_data['bot_instance'] = bot
