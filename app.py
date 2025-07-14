@@ -43,13 +43,73 @@ class USDTDominanceAnalyzer:
                 support_level REAL
             )
         ''')
+        
+        # Create table for historical dominance data
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS usdt_dominance_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp DATETIME NOT NULL,
+                dominance_pct REAL NOT NULL,
+                raw_data TEXT,
+                UNIQUE(timestamp)
+            )
+        ''')
         conn.commit()
         conn.close()
         
-    def get_usdt_dominance_data(self) -> Optional[pd.DataFrame]:
-        """Fetch USDT dominance historical data"""
+    def store_current_dominance(self, dominance_pct: float, raw_data: str = None):
+        """Store current dominance data in history table"""
         try:
-            # Using CoinGecko API for dominance data
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            # Store with current timestamp, ignore duplicates
+            cursor.execute('''
+                INSERT OR IGNORE INTO usdt_dominance_history 
+                (timestamp, dominance_pct, raw_data) 
+                VALUES (datetime('now'), ?, ?)
+            ''', (dominance_pct, raw_data or ""))
+            
+            conn.commit()
+            conn.close()
+            logger.info(f"Stored USDT dominance: {dominance_pct:.3f}%")
+            
+        except Exception as e:
+            logger.error(f"Failed to store dominance data: {e}")
+    
+    def get_historical_dominance(self, hours: int = 168) -> Optional[pd.DataFrame]:
+        """Get historical dominance data from database (default: 7 days)"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            
+            # Get historical data from database
+            query = '''
+                SELECT timestamp, dominance_pct 
+                FROM usdt_dominance_history 
+                WHERE timestamp >= datetime('now', '-{} hours')
+                ORDER BY timestamp ASC
+            '''.format(hours)
+            
+            df = pd.read_sql_query(query, conn, parse_dates=['timestamp'])
+            conn.close()
+            
+            if df.empty:
+                logger.warning("No historical dominance data found")
+                return None
+                
+            df.set_index('timestamp', inplace=True)
+            df.rename(columns={'dominance_pct': 'dominance'}, inplace=True)
+            
+            return df
+            
+        except Exception as e:
+            logger.error(f"Error fetching historical dominance data: {e}")
+            return None
+    
+    def get_usdt_dominance_data(self) -> Optional[pd.DataFrame]:
+        """Fetch current USDT dominance and build historical dataset"""
+        try:
+            # Fetch current dominance from CoinGecko
             url = "https://api.coingecko.com/api/v3/global"
             response = requests.get(url, timeout=10)
             data = response.json()
@@ -58,50 +118,106 @@ class USDTDominanceAnalyzer:
                 logger.error("Invalid dominance data response")
                 return None
                 
-            # Get current dominance
             current_dominance = data['data']['market_cap_percentage'].get('usdt', 0)
             
-            # For historical data, we'll use a simplified approach
-            # In production, you'd want to use a proper historical API
-            timestamps = pd.date_range(end=datetime.now(), periods=100, freq='1H')
+            # Store current dominance in history
+            self.store_current_dominance(current_dominance, str(data))
             
-            # Simulate historical data with some random walk around current value
-            # In real implementation, fetch actual historical dominance data
-            import random
-            base = current_dominance
-            historical_data = []
+            # Get historical data from database
+            historical_df = self.get_historical_dominance(hours=168)  # 7 days
             
-            for i, ts in enumerate(timestamps):
-                # Add some realistic variation (±0.5% typically)
-                variation = random.uniform(-0.3, 0.3)
-                dominance = max(0.5, min(15.0, base + variation))  # Keep realistic bounds
-                historical_data.append({
-                    'timestamp': ts,
-                    'dominance': dominance
-                })
-                base = dominance  # Use previous value as base for next
+            if historical_df is None or len(historical_df) < 10:
+                logger.warning("Insufficient historical data, building minimal dataset")
+                # Create minimal dataset with just current value
+                now = datetime.now()
+                timestamps = pd.date_range(end=now, periods=24, freq='1h')
                 
-            # Set the last value to actual current dominance
-            historical_data[-1]['dominance'] = current_dominance
+                # Use current dominance as baseline for recent hours
+                historical_data = []
+                for ts in timestamps[:-1]:
+                    # Add small realistic variation for recent hours
+                    variation = np.random.normal(0, 0.1)  # Small normal distribution
+                    dominance = max(0.5, min(15.0, current_dominance + variation))
+                    historical_data.append({
+                        'timestamp': ts,
+                        'dominance': dominance
+                    })
+                
+                # Add current value
+                historical_data.append({
+                    'timestamp': now,
+                    'dominance': current_dominance
+                })
+                
+                df = pd.DataFrame(historical_data)
+                df.set_index('timestamp', inplace=True)
+                return df
             
-            df = pd.DataFrame(historical_data)
-            df.set_index('timestamp', inplace=True)
+            # Ensure current value is the latest
+            now = datetime.now()
+            if historical_df.index[-1] < now - pd.Timedelta(minutes=30):
+                # Add current value if last entry is older than 30 minutes
+                new_row = pd.DataFrame(
+                    {'dominance': [current_dominance]}, 
+                    index=[now]
+                )
+                historical_df = pd.concat([historical_df, new_row])
             
-            return df
+            return historical_df
             
         except Exception as e:
             logger.error(f"Error fetching USDT dominance data: {e}")
             return None
             
+    def get_last_stored_analysis(self) -> Optional[Dict]:
+        """Get the last stored analysis for comparison"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            cursor.execute('''
+                SELECT dominance_pct, sentiment, trend_direction, signal_strength, timestamp
+                FROM usdt_dominance 
+                ORDER BY timestamp DESC 
+                LIMIT 1
+            ''')
+            
+            result = cursor.fetchone()
+            conn.close()
+            
+            if result:
+                return {
+                    'dominance': result[0],
+                    'sentiment': result[1],
+                    'trend_direction': result[2],
+                    'signal_strength': result[3],
+                    'timestamp': result[4]
+                }
+            return None
+            
+        except Exception as e:
+            logger.error(f"Error fetching last analysis: {e}")
+            return None
+    
     def analyze_dominance_sentiment(self, df: pd.DataFrame) -> Dict:
         """Analyze USDT dominance for market sentiment"""
-        if len(df) < 20:
+        if len(df) < 2:
+            logger.warning("Insufficient data for analysis")
             return {}
             
-        # Calculate technical indicators
-        df['sma_20'] = df['dominance'].rolling(window=20).mean()
+        # Data validation
+        if df['dominance'].isna().any():
+            logger.warning("NaN values detected in dominance data")
+            df = df.dropna()
+            
+        if len(df) < 2:
+            return {}
+            
+        # Calculate technical indicators with proper window sizes
+        min_window = min(20, len(df))
+        df['sma_20'] = df['dominance'].rolling(window=min_window).mean()
         df['sma_50'] = df['dominance'].rolling(window=min(50, len(df))).mean()
-        df['std_20'] = df['dominance'].rolling(window=20).std()
+        df['std_20'] = df['dominance'].rolling(window=min_window).std()
         
         # Bollinger Bands for dominance
         df['bb_upper'] = df['sma_20'] + (df['std_20'] * 2)
@@ -109,38 +225,79 @@ class USDTDominanceAnalyzer:
         
         # RSI for dominance
         delta = df['dominance'].diff()
-        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+        gain = (delta.where(delta > 0, 0)).rolling(window=min(14, len(df))).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=min(14, len(df))).mean()
         rs = gain / loss
         df['rsi'] = 100 - (100 / (1 + rs))
         
         current = df.iloc[-1]
-        previous = df.iloc[-2] if len(df) > 1 else current
         
+        # Get last stored analysis for better percentage calculation
+        last_analysis = self.get_last_stored_analysis()
+        
+        # Calculate percentage change using multiple timeframes
+        pct_changes = {}
+        
+        # 1-hour change (if we have previous data point)
+        if len(df) >= 2:
+            previous_1h = df.iloc[-2]
+            pct_changes['1h'] = ((current['dominance'] - previous_1h['dominance']) / previous_1h['dominance']) * 100
+        
+        # 4-hour change
+        if len(df) >= 4:
+            previous_4h = df.iloc[-4]
+            pct_changes['4h'] = ((current['dominance'] - previous_4h['dominance']) / previous_4h['dominance']) * 100
+        
+        # 24-hour change
+        if len(df) >= 24:
+            previous_24h = df.iloc[-24]
+            pct_changes['24h'] = ((current['dominance'] - previous_24h['dominance']) / previous_24h['dominance']) * 100
+        
+        # Use the most appropriate timeframe for percentage change
+        if last_analysis and last_analysis['dominance']:
+            # Compare with last stored analysis
+            pct_change = ((current['dominance'] - last_analysis['dominance']) / last_analysis['dominance']) * 100
+        elif '24h' in pct_changes:
+            pct_change = pct_changes['24h']
+        elif '4h' in pct_changes:
+            pct_change = pct_changes['4h']
+        elif '1h' in pct_changes:
+            pct_change = pct_changes['1h']
+        else:
+            pct_change = 0.0
+            
         # Determine trend and sentiment
         trend_score = 0
         
-        # Short-term trend (last 10 periods)
-        recent_trend = df['dominance'].tail(10)
+        # Short-term trend (last available periods)
+        recent_periods = min(10, len(df))
+        recent_trend = df['dominance'].tail(recent_periods)
         if len(recent_trend) >= 2:
             if recent_trend.iloc[-1] > recent_trend.iloc[0]:
                 trend_score += 1  # Rising dominance = bearish for crypto
             else:
                 trend_score -= 1  # Falling dominance = bullish for crypto
                 
-        # Moving average position
-        if current['dominance'] > current['sma_20']:
-            trend_score += 1
-        else:
-            trend_score -= 1
-            
-        # Rate of change
-        pct_change = ((current['dominance'] - previous['dominance']) / previous['dominance']) * 100
-        if abs(pct_change) > 2:  # Significant move
+        # Moving average position (if we have enough data)
+        if not pd.isna(current['sma_20']):
+            if current['dominance'] > current['sma_20']:
+                trend_score += 1
+            else:
+                trend_score -= 1
+        
+        # Rate of change significance
+        if abs(pct_change) > 1.5:  # Lowered threshold for more sensitivity
             if pct_change > 0:
                 trend_score += 2  # Strong bearish signal
             else:
                 trend_score -= 2  # Strong bullish signal
+        
+        # Multiple timeframe confirmation
+        if '1h' in pct_changes and '4h' in pct_changes:
+            if pct_changes['1h'] > 0 and pct_changes['4h'] > 0:
+                trend_score += 1  # Confirmed uptrend
+            elif pct_changes['1h'] < 0 and pct_changes['4h'] < 0:
+                trend_score -= 1  # Confirmed downtrend
                 
         # Classify sentiment
         if trend_score >= 2:
@@ -151,24 +308,32 @@ class USDTDominanceAnalyzer:
             sentiment = "NEUTRAL"
             
         # Detect breakout levels
-        recent_high = df['dominance'].rolling(window=20).max().iloc[-1]
-        recent_low = df['dominance'].rolling(window=20).min().iloc[-1]
+        recent_high = df['dominance'].rolling(window=min(20, len(df))).max().iloc[-1]
+        recent_low = df['dominance'].rolling(window=min(20, len(df))).min().iloc[-1]
         
         # Signal strength based on multiple factors
         strength_score = 0
         
         # RSI extremes
-        if current['rsi'] > 70 or current['rsi'] < 30:
-            strength_score += 1
-            
+        if not pd.isna(current['rsi']):
+            if current['rsi'] > 70 or current['rsi'] < 30:
+                strength_score += 1
+                
         # Bollinger Band breaks
-        if current['dominance'] > current['bb_upper'] or current['dominance'] < current['bb_lower']:
-            strength_score += 1
-            
+        if not pd.isna(current['bb_upper']) and not pd.isna(current['bb_lower']):
+            if current['dominance'] > current['bb_upper'] or current['dominance'] < current['bb_lower']:
+                strength_score += 1
+                
         # Volume of change
-        if abs(pct_change) > 3:
+        if abs(pct_change) > 2.5:
             strength_score += 1
             
+        # Multiple timeframe alignment
+        if len(pct_changes) >= 2:
+            same_direction = all(x > 0 for x in pct_changes.values()) or all(x < 0 for x in pct_changes.values())
+            if same_direction:
+                strength_score += 1
+                
         signal_strength = "STRONG" if strength_score >= 2 else "MODERATE" if strength_score >= 1 else "WEAK"
         
         return {
@@ -178,30 +343,47 @@ class USDTDominanceAnalyzer:
             'signal_strength': signal_strength,
             'trend_direction': "UP" if trend_score > 0 else "DOWN",
             'pct_change': pct_change,
-            'rsi': current['rsi'],
+            'pct_changes': pct_changes,
+            'rsi': current['rsi'] if not pd.isna(current['rsi']) else 50.0,
             'resistance_level': recent_high,
             'support_level': recent_low,
-            'bb_upper': current['bb_upper'],
-            'bb_lower': current['bb_lower']
+            'bb_upper': current['bb_upper'] if not pd.isna(current['bb_upper']) else current['dominance'],
+            'bb_lower': current['bb_lower'] if not pd.isna(current['bb_lower']) else current['dominance'],
+            'trend_score': trend_score,
+            'strength_score': strength_score
         }
         
     def generate_dominance_alert(self, analysis: Dict) -> str:
-        """Generate alert message for dominance changes"""
+        """Generate enhanced alert message for dominance changes"""
         sentiment = analysis['sentiment']
         strength = analysis['signal_strength']
         dominance = analysis['dominance']
         pct_change = analysis['pct_change']
+        pct_changes = analysis.get('pct_changes', {})
         
         # Emoji based on sentiment
         emoji = "🔴" if sentiment == "BEARISH" else "🟢" if sentiment == "BULLISH" else "⚪"
         
         alert = f"{emoji} <b>USDT.D SENTIMENT ALERT</b>\n\n"
-        alert += f"📊 Dominance: {dominance:.2f}% ({pct_change:+.2f}%)\n"
+        alert += f"📊 Dominance: {dominance:.3f}% ({pct_change:+.2f}%)\n"
         alert += f"🎯 Market Sentiment: <b>{sentiment}</b>\n"
         alert += f"⚡ Signal Strength: {strength}\n"
-        alert += f"📈 RSI: {analysis['rsi']:.1f}\n\n"
+        alert += f"📈 RSI: {analysis['rsi']:.1f}\n"
+        
+        # Add multiple timeframe changes if available
+        if pct_changes:
+            alert += "\n📊 <b>Timeframe Analysis:</b>\n"
+            for timeframe, change in pct_changes.items():
+                direction = "📈" if change > 0 else "📉" if change < 0 else "➡️"
+                alert += f"{direction} {timeframe}: {change:+.2f}%\n"
+        
+        # Add technical levels
+        alert += f"\n🔍 <b>Technical Levels:</b>\n"
+        alert += f"⬆️ Resistance: {analysis['resistance_level']:.3f}%\n"
+        alert += f"⬇️ Support: {analysis['support_level']:.3f}%\n"
         
         # Interpretation
+        alert += "\n💡 <b>Market Interpretation:</b>\n"
         if sentiment == "BEARISH":
             alert += "📉 <i>USDT dominance rising - traders moving to stablecoins</i>\n"
             alert += "⚠️ <i>Expect crypto weakness/selling pressure</i>"
