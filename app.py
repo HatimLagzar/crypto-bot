@@ -432,7 +432,7 @@ class VolumeSurgeAnalyzer:
         
         # Volume surge thresholds
         self.thresholds = {
-            'notable': 2.5,      # 2.5x average volume
+            'notable': 2.0,      # 2.0x average volume
             'significant': 5.0,   # 5x average volume  
             'extreme': 10.0,      # 10x average volume
             'mega': 20.0         # 20x average volume (very rare)
@@ -1534,8 +1534,8 @@ class EnhancedTelegramBot:
         )
         
         # RSI filtering - avoid breakouts in extreme conditions
-        rsi_allows_bullish = current['rsi'] < 70  # Not overbought
-        rsi_allows_bearish = current['rsi'] > 30  # Not oversold
+        rsi_allows_bullish = current['rsi'] < 75  # Not overbought
+        rsi_allows_bearish = current['rsi'] > 25  # Not oversold
         
         # Price action confirmation - ensure strong candle close
         bullish_price_action = (
@@ -1563,8 +1563,8 @@ class EnhancedTelegramBot:
         
         # Multi-timeframe trend confirmation
         higher_tf_trend = self.get_higher_timeframe_trend(symbol)
-        trend_aligns_bullish = higher_tf_trend in ["bullish", "neutral"]  # Allow neutral for sideways breakouts
-        trend_aligns_bearish = higher_tf_trend in ["bearish", "neutral"]
+        trend_aligns_bullish = higher_tf_trend in ["bullish", "neutral"] or higher_tf_trend is None  # Allow neutral for sideways breakouts
+        trend_aligns_bearish = higher_tf_trend in ["bearish", "neutral"] or higher_tf_trend is None
         
         # USDT dominance sentiment filter
         market_sentiment = self.get_current_market_sentiment()
