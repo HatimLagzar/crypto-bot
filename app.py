@@ -1313,6 +1313,24 @@ class OrderBookAnalyzer:
             'resistance_levels': filter_close_levels(resistance_levels)[:5]
         }
 
+    def get_deepest_walls(self, symbol: str = 'BTC/USDT', limit: int = 5) -> Optional[Dict]:
+        """Fetch and return the deepest bid and ask walls sorted by size."""
+        ob_data = self.get_order_book_data(symbol)
+        if not ob_data:
+            return None
+        bids = ob_data['bids']
+        asks = ob_data['asks']
+        mid_price = ob_data['mid_price']
+        levels = self.detect_significant_levels(bids, asks, mid_price)
+        deepest_bids = sorted(levels['significant_bids'], key=lambda x: x['quantity'], reverse=True)[:limit]
+        deepest_asks = sorted(levels['significant_asks'], key=lambda x: x['quantity'], reverse=True)[:limit]
+        return {
+            'symbol': symbol,
+            'current_price': mid_price,
+            'bids': deepest_bids,
+            'asks': deepest_asks
+        }
+
     def classify_market_sentiment(self, analysis: Dict) -> str:
         """Classify overall market sentiment based on order book"""
         spread_bps = analysis.get('spread_bps', 0)
@@ -1565,6 +1583,33 @@ class EnhancedTelegramBot:
         self.volume_surge_running = False
         self.setup_running = False
         self.last_dominance_sentiment = None
+
+        application = Application.builder().token(bot_token).build()
+        application.add_handler(CommandHandler('deepestwalls', self.deepest_walls_command))
+    async def deepest_walls_command(self, update: ContextTypes.DEFAULT_TYPE, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /deepestwalls: show top bid/ask walls by size for each watchlist symbol."""
+        messages = []
+        for symbol in self.symbols:
+            data = self.orderbook_analyzer.get_deepest_walls(symbol)
+            if not data:
+                continue
+            price = data['current_price']
+            text = [f"🔥 {symbol} (${price:.4f}):"]
+            # Format top bids
+            text.append("🟢 Top Bid Walls:")
+            for wall in data['bids']:
+                dist = (price - wall['price']) / price * 100
+                text.append(f"  • ${wall['price']:.4f} – qty {wall['quantity']:.0f} – {dist:.2f}% below")
+            # Format top asks
+            text.append("🔴 Top Ask Walls:")
+            for wall in data['asks']:
+                dist = (wall['price'] - price) / price * 100
+                text.append(f"  • ${wall['price']:.4f} – qty {wall['quantity']:.0f} – {dist:.2f}% above")
+            messages.append("\n".join(text))
+        if not messages:
+            await context.bot.send_message(chat_id=self.chat_id, text="No deep walls found.")
+        else:
+            await context.bot.send_message(chat_id=self.chat_id, text="\n\n".join(messages), parse_mode='HTML')
 
     def get_ohlcv(self, symbol, timeframe='1h', limit=50):
         """Fetch OHLCV data"""
