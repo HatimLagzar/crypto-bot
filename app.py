@@ -1226,12 +1226,16 @@ class OrderBookAnalyzer:
         significant_asks = []
         for price, qty in bids:
             if qty >= avg_bid_size * self.thresholds['huge_wall_multiplier']:
-                distance_pct = ((mid_price - price) / mid_price) * 100
-                significant_bids.append({'price': price, 'quantity': qty, 'distance_pct': distance_pct})
+                usdt_value = price * qty
+                if usdt_value >= 1000000:  # Minimum 1M USDT
+                    distance_pct = ((mid_price - price) / mid_price) * 100
+                    significant_bids.append({'price': price, 'quantity': qty, 'distance_pct': distance_pct})
         for price, qty in asks:
             if qty >= avg_ask_size * self.thresholds['huge_wall_multiplier']:
-                distance_pct = ((price - mid_price) / mid_price) * 100
-                significant_asks.append({'price': price, 'quantity': qty, 'distance_pct': distance_pct})
+                usdt_value = price * qty
+                if usdt_value >= 1000000:  # Minimum 1M USDT
+                    distance_pct = ((price - mid_price) / mid_price) * 100
+                    significant_asks.append({'price': price, 'quantity': qty, 'distance_pct': distance_pct})
 
         significant_bids.sort(key=lambda x: x['distance_pct'])
         significant_asks.sort(key=lambda x: x['distance_pct'])
@@ -1272,7 +1276,7 @@ class OrderBookAnalyzer:
             if qty >= support_threshold:
                 # Calculate dollar size for better comparison
                 dollar_size = price * qty
-                if dollar_size >= 5000:  # Minimum $5k wall
+                if dollar_size >= 1000000:  # Minimum 1M USDT wall
                     distance_pct = ((mid_price - price) / mid_price) * 100
                     if distance_pct <= 5:  # Within 5% of current price
                         support_levels.append({
@@ -1286,7 +1290,7 @@ class OrderBookAnalyzer:
         for price, qty in asks:
             if qty >= resistance_threshold:
                 dollar_size = price * qty
-                if dollar_size >= 5000:  # Minimum $5k wall
+                if dollar_size >= 1000000:  # Minimum 1M USDT wall
                     distance_pct = ((price - mid_price) / mid_price) * 100
                     if distance_pct <= 5:  # Within 5% of current price
                         resistance_levels.append({
@@ -1322,8 +1326,9 @@ class OrderBookAnalyzer:
         asks = ob_data['asks']
         mid_price = ob_data['mid_price']
         levels = self.detect_significant_levels(bids, asks, mid_price)
-        deepest_bids = sorted(levels['significant_bids'], key=lambda x: x['quantity'], reverse=True)[:limit]
-        deepest_asks = sorted(levels['significant_asks'], key=lambda x: x['quantity'], reverse=True)[:limit]
+        # Sort by USDT value (price * quantity) instead of just quantity
+        deepest_bids = sorted(levels['significant_bids'], key=lambda x: x['price'] * x['quantity'], reverse=True)[:limit]
+        deepest_asks = sorted(levels['significant_asks'], key=lambda x: x['price'] * x['quantity'], reverse=True)[:limit]
         return {
             'symbol': symbol,
             'current_price': mid_price,
