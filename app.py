@@ -1227,13 +1227,13 @@ class OrderBookAnalyzer:
         for price, qty in bids:
             if qty >= avg_bid_size * self.thresholds['huge_wall_multiplier']:
                 usdt_value = price * qty
-                if usdt_value >= 250000:  # Minimum 250K USDT
+                if usdt_value >= 1000000:  # Minimum 1M USDT
                     distance_pct = ((mid_price - price) / mid_price) * 100
                     significant_bids.append({'price': price, 'quantity': qty, 'distance_pct': distance_pct})
         for price, qty in asks:
             if qty >= avg_ask_size * self.thresholds['huge_wall_multiplier']:
                 usdt_value = price * qty
-                if usdt_value >= 250000:  # Minimum 250K USDT
+                if usdt_value >= 1000000:  # Minimum 1M USDT
                     distance_pct = ((price - mid_price) / mid_price) * 100
                     significant_asks.append({'price': price, 'quantity': qty, 'distance_pct': distance_pct})
 
@@ -1276,7 +1276,7 @@ class OrderBookAnalyzer:
             if qty >= support_threshold:
                 # Calculate dollar size for better comparison
                 dollar_size = price * qty
-                if dollar_size >= 250000:  # Minimum 250K USDT wall
+                if dollar_size >= 1000000:  # Minimum 1M USDT wall
                     distance_pct = ((mid_price - price) / mid_price) * 100
                     if distance_pct <= 5:  # Within 5% of current price
                         support_levels.append({
@@ -1290,7 +1290,7 @@ class OrderBookAnalyzer:
         for price, qty in asks:
             if qty >= resistance_threshold:
                 dollar_size = price * qty
-                if dollar_size >= 250000:  # Minimum 250K USDT wall
+                if dollar_size >= 1000000:  # Minimum 1M USDT wall
                     distance_pct = ((price - mid_price) / mid_price) * 100
                     if distance_pct <= 5:  # Within 5% of current price
                         resistance_levels.append({
