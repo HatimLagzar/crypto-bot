@@ -1504,14 +1504,18 @@ class OrderBookAnalyzer:
             for bid in significant_bids[:3]:  # Show top 3
                 # Use more decimals for low-price coins
                 decimals = 6 if bid['price'] < 1 else 4 if bid['price'] < 100 else 2
-                report += f"  ${bid['price']:.{decimals}f} ({bid['distance_pct']:.2f}% below)\n"
+                # Calculate USDT value at this level
+                usdt_value = bid['quantity'] * bid['price']
+                report += f"  ${bid['price']:.{decimals}f} ({bid['distance_pct']:.2f}% below) - ${usdt_value:,.0f} USDT\n"
                 
         if significant_asks:
             report += f"\n🔴 <b>Key Resistance Levels:</b>\n"
             for ask in significant_asks[:3]:  # Show top 3
                 # Use more decimals for low-price coins
                 decimals = 6 if ask['price'] < 1 else 4 if ask['price'] < 100 else 2
-                report += f"  ${ask['price']:.{decimals}f} ({ask['distance_pct']:.2f}% above)\n"
+                # Calculate USDT value at this level
+                usdt_value = ask['quantity'] * ask['price']
+                report += f"  ${ask['price']:.{decimals}f} ({ask['distance_pct']:.2f}% above) - ${usdt_value:,.0f} USDT\n"
         
         # Wall counts
         if analysis.get('large_bid_walls', 0) > 0 or analysis.get('large_ask_walls', 0) > 0:
@@ -2495,12 +2499,14 @@ async def entry_command(update, context: ContextTypes.DEFAULT_TYPE):
             text.append("🟢 Top Bid Walls:")
             for wall in data['bids']:
                 dist = (price - wall['price']) / price * 100
-                text.append(f"  • ${wall['price']:.4f} – qty {wall['quantity']:.0f} – {dist:.2f}% below")
+                usdt_value = wall['quantity'] * wall['price']
+                text.append(f"  • ${wall['price']:.4f} – qty {wall['quantity']:.0f} – {dist:.2f}% below – ${usdt_value:,.0f} USDT")
             # Format top asks
             text.append("🔴 Top Ask Walls:")
             for wall in data['asks']:
                 dist = (wall['price'] - price) / price * 100
-                text.append(f"  • ${wall['price']:.4f} – qty {wall['quantity']:.0f} – {dist:.2f}% above")
+                usdt_value = wall['quantity'] * wall['price']
+                text.append(f"  • ${wall['price']:.4f} – qty {wall['quantity']:.0f} – {dist:.2f}% above – ${usdt_value:,.0f} USDT")
             messages.append("\n".join(text))
         
         if not messages:
@@ -2530,7 +2536,8 @@ async def entry_command(update, context: ContextTypes.DEFAULT_TYPE):
         message += "🟢 <b>Top Bid Walls:</b>\n"
         for wall in data['bids']:
             dist = (price - wall['price']) / price * 100
-            message += f"  • ${wall['price']:.4f} – qty {wall['quantity']:.0f} – {dist:.2f}% below\n"
+            usdt_value = wall['quantity'] * wall['price']
+            message += f"  • ${wall['price']:.4f} – qty {wall['quantity']:.0f} – {dist:.2f}% below – ${usdt_value:,.0f} USDT\n"
         
         message += "\n"
         
@@ -2538,7 +2545,8 @@ async def entry_command(update, context: ContextTypes.DEFAULT_TYPE):
         message += "🔴 <b>Top Ask Walls:</b>\n"
         for wall in data['asks']:
             dist = (wall['price'] - price) / price * 100
-            message += f"  • ${wall['price']:.4f} – qty {wall['quantity']:.0f} – {dist:.2f}% above\n"
+            usdt_value = wall['quantity'] * wall['price']
+            message += f"  • ${wall['price']:.4f} – qty {wall['quantity']:.0f} – {dist:.2f}% above – ${usdt_value:,.0f} USDT\n"
         
         await update.message.reply_text(message, parse_mode='HTML')
         
