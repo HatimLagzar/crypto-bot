@@ -1216,39 +1216,79 @@ class OrderBookAnalyzer:
         return pressure
 
     def detect_significant_levels(self, bids: List[List[float]], asks: List[List[float]], mid_price: float) -> Dict:
-        """Detect significant support and resistance levels"""
-        bid_sizes = [qty for _, qty in bids[:100]]
-        ask_sizes = [qty for _, qty in asks[:100]]
-        avg_bid_size = statistics.mean(bid_sizes) if bid_sizes else 0
-        avg_ask_size = statistics.mean(ask_sizes) if ask_sizes else 0
+        """Detect significant support and resistance levels by aggregating orders in price zones"""
+        
+        def aggregate_orders_by_zone(orders, zone_pct=0.1):
+            """Aggregate orders within zone_pct price range"""
+            if not orders:
+                return []
+            
+            zones = []
+            sorted_orders = sorted(orders, key=lambda x: x[0])  # Sort by price
+            
+            current_zone = {'min_price': sorted_orders[0][0], 'max_price': sorted_orders[0][0], 
+                          'total_qty': sorted_orders[0][1], 'orders': [sorted_orders[0]]}
+            
+            for price, qty in sorted_orders[1:]:
+                # Check if this order is within zone_pct of current zone
+                zone_center = (current_zone['min_price'] + current_zone['max_price']) / 2
+                
+                if abs(price - zone_center) / zone_center * 100 <= zone_pct:
+                    # Add to current zone
+                    current_zone['min_price'] = min(current_zone['min_price'], price)
+                    current_zone['max_price'] = max(current_zone['max_price'], price)
+                    current_zone['total_qty'] += qty
+                    current_zone['orders'].append([price, qty])
+                else:
+                    # Start new zone
+                    zones.append(current_zone)
+                    current_zone = {'min_price': price, 'max_price': price, 
+                                  'total_qty': qty, 'orders': [[price, qty]]}
+            
+            zones.append(current_zone)  # Add last zone
+            return zones
+
+        # Aggregate bids and asks into price zones
+        bid_zones = aggregate_orders_by_zone(bids)
+        ask_zones = aggregate_orders_by_zone(asks)
 
         significant_bids = []
         significant_asks = []
-        for price, qty in bids:
-            if qty >= avg_bid_size * self.thresholds['huge_wall_multiplier']:
-                usdt_value = price * qty
-                if usdt_value >= 1000000:  # Minimum 1M USDT
-                    distance_pct = ((mid_price - price) / mid_price) * 100
-                    significant_bids.append({'price': price, 'quantity': qty, 'distance_pct': distance_pct})
-        for price, qty in asks:
-            if qty >= avg_ask_size * self.thresholds['huge_wall_multiplier']:
-                usdt_value = price * qty
-                if usdt_value >= 1000000:  # Minimum 1M USDT
-                    distance_pct = ((price - mid_price) / mid_price) * 100
-                    significant_asks.append({'price': price, 'quantity': qty, 'distance_pct': distance_pct})
+        
+        # Analyze bid zones
+        for zone in bid_zones:
+            avg_price = (zone['min_price'] + zone['max_price']) / 2
+            total_usdt = avg_price * zone['total_qty']
+            
+            if total_usdt >= 1000000:  # Minimum 1M USDT in the zone
+                distance_pct = ((mid_price - avg_price) / mid_price) * 100
+                significant_bids.append({
+                    'price': avg_price,
+                    'quantity': zone['total_qty'],
+                    'distance_pct': distance_pct,
+                    'usdt_value': total_usdt,
+                    'order_count': len(zone['orders']),
+                    'price_range': f"${zone['min_price']:.2f} - ${zone['max_price']:.2f}"
+                })
+        
+        # Analyze ask zones  
+        for zone in ask_zones:
+            avg_price = (zone['min_price'] + zone['max_price']) / 2
+            total_usdt = avg_price * zone['total_qty']
+            
+            if total_usdt >= 1000000:  # Minimum 1M USDT in the zone
+                distance_pct = ((avg_price - mid_price) / mid_price) * 100
+                significant_asks.append({
+                    'price': avg_price,
+                    'quantity': zone['total_qty'],
+                    'distance_pct': distance_pct,
+                    'usdt_value': total_usdt,
+                    'order_count': len(zone['orders']),
+                    'price_range': f"${zone['min_price']:.2f} - ${zone['max_price']:.2f}"
+                })
 
         significant_bids.sort(key=lambda x: x['distance_pct'])
         significant_asks.sort(key=lambda x: x['distance_pct'])
-
-        def _filter_levels(levels):
-            filtered = []
-            for lvl in levels:
-                if not any(abs(lvl['distance_pct'] - f['distance_pct']) < 0.1 for f in filtered):
-                    filtered.append(lvl)
-            return filtered
-
-        significant_bids = _filter_levels(significant_bids)
-        significant_asks = _filter_levels(significant_asks)
 
         return {
             'significant_bids': significant_bids[:10],
@@ -1259,46 +1299,66 @@ class OrderBookAnalyzer:
 
     def identify_significant_levels(self, bids: List[List[float]], asks: List[List[float]], mid_price: float) -> Dict:
         """Identify significant support and resistance levels for entry analysis"""
-        bid_sizes = [qty for _, qty in bids[:100]]
-        ask_sizes = [qty for _, qty in asks[:100]]
-        avg_bid_size = statistics.mean(bid_sizes) if bid_sizes else 0
-        avg_ask_size = statistics.mean(ask_sizes) if ask_sizes else 0
-        
-        # Use a lower threshold for entry analysis to find more levels
-        support_threshold = avg_bid_size * 3  # 3x average instead of 10x
-        resistance_threshold = avg_ask_size * 3
+        # Note: Using zone aggregation instead of individual order thresholds
         
         support_levels = []
         resistance_levels = []
         
-        # Find support levels (strong bid walls)
-        for price, qty in bids:
-            if qty >= support_threshold:
-                # Calculate dollar size for better comparison
-                dollar_size = price * qty
-                if dollar_size >= 1000000:  # Minimum 1M USDT wall
-                    distance_pct = ((mid_price - price) / mid_price) * 100
-                    if distance_pct <= 5:  # Within 5% of current price
-                        support_levels.append({
-                            'price': price,
-                            'size': dollar_size,
-                            'quantity': qty,
-                            'distance_pct': distance_pct
-                        })
+        # Aggregate orders into zones first
+        def aggregate_orders_by_zone(orders, zone_pct=0.1):
+            if not orders:
+                return []
+            zones = []
+            sorted_orders = sorted(orders, key=lambda x: x[0])
+            current_zone = {'min_price': sorted_orders[0][0], 'max_price': sorted_orders[0][0], 
+                          'total_qty': sorted_orders[0][1], 'orders': [sorted_orders[0]]}
+            
+            for price, qty in sorted_orders[1:]:
+                zone_center = (current_zone['min_price'] + current_zone['max_price']) / 2
+                if abs(price - zone_center) / zone_center * 100 <= zone_pct:
+                    current_zone['min_price'] = min(current_zone['min_price'], price)
+                    current_zone['max_price'] = max(current_zone['max_price'], price)
+                    current_zone['total_qty'] += qty
+                    current_zone['orders'].append([price, qty])
+                else:
+                    zones.append(current_zone)
+                    current_zone = {'min_price': price, 'max_price': price, 
+                                  'total_qty': qty, 'orders': [[price, qty]]}
+            zones.append(current_zone)
+            return zones
+
+        bid_zones = aggregate_orders_by_zone(bids)
+        ask_zones = aggregate_orders_by_zone(asks)
+
+        # Find support levels from bid zones
+        for zone in bid_zones:
+            avg_price = (zone['min_price'] + zone['max_price']) / 2
+            total_usdt = avg_price * zone['total_qty']
+            distance_pct = ((mid_price - avg_price) / mid_price) * 100
+            
+            if total_usdt >= 1000000 and distance_pct <= 5 and distance_pct >= 0:
+                support_levels.append({
+                    'price': avg_price,
+                    'size': total_usdt,
+                    'quantity': zone['total_qty'],
+                    'distance_pct': distance_pct,
+                    'order_count': len(zone['orders'])
+                })
         
-        # Find resistance levels (strong ask walls)
-        for price, qty in asks:
-            if qty >= resistance_threshold:
-                dollar_size = price * qty
-                if dollar_size >= 1000000:  # Minimum 1M USDT wall
-                    distance_pct = ((price - mid_price) / mid_price) * 100
-                    if distance_pct <= 5:  # Within 5% of current price
-                        resistance_levels.append({
-                            'price': price,
-                            'size': dollar_size,
-                            'quantity': qty,
-                            'distance_pct': distance_pct
-                        })
+        # Find resistance levels from ask zones
+        for zone in ask_zones:
+            avg_price = (zone['min_price'] + zone['max_price']) / 2
+            total_usdt = avg_price * zone['total_qty']
+            distance_pct = ((avg_price - mid_price) / mid_price) * 100
+            
+            if total_usdt >= 1000000 and distance_pct <= 5 and distance_pct >= 0:
+                resistance_levels.append({
+                    'price': avg_price,
+                    'size': total_usdt,
+                    'quantity': zone['total_qty'],
+                    'distance_pct': distance_pct,
+                    'order_count': len(zone['orders'])
+                })
         
         # Sort by distance from current price
         support_levels.sort(key=lambda x: x['distance_pct'])
