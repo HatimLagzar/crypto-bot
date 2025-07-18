@@ -1216,7 +1216,35 @@ class OrderBookAnalyzer:
         return pressure
 
     def detect_significant_levels(self, bids: List[List[float]], asks: List[List[float]], mid_price: float) -> Dict:
-        """Detect significant support and resistance levels by aggregating orders in price zones"""
+        """Detect significant support and resistance levels by aggregating orders in price zones for trading"""
+        
+        def get_dynamic_thresholds(bids, asks, mid_price):
+            """Calculate dynamic thresholds based on market conditions"""
+            # Calculate total volume in top 50 levels
+            total_bid_volume = sum(price * qty for price, qty in bids[:50])
+            total_ask_volume = sum(price * qty for price, qty in asks[:50])
+            total_volume = total_bid_volume + total_ask_volume
+            
+            # Dynamic zone size based on price (higher prices need wider zones)
+            if mid_price > 100000:  # BTC level
+                zone_pct = 0.05  # 0.05% for high-value assets
+            elif mid_price > 1000:  # ETH level  
+                zone_pct = 0.1   # 0.1% for mid-value assets
+            else:
+                zone_pct = 0.2   # 0.2% for low-value assets
+            
+            # Dynamic thresholds based on volume
+            if total_volume > 50000000:  # High volume day
+                major_threshold = 500000   # 500K for major levels
+                minor_threshold = 100000   # 100K for minor levels
+            elif total_volume > 20000000:  # Medium volume
+                major_threshold = 300000   # 300K for major levels
+                minor_threshold = 75000    # 75K for minor levels
+            else:  # Low volume
+                major_threshold = 200000   # 200K for major levels
+                minor_threshold = 50000    # 50K for minor levels
+            
+            return zone_pct, major_threshold, minor_threshold
         
         def aggregate_orders_by_zone(orders, zone_pct=0.1):
             """Aggregate orders within zone_pct price range"""
@@ -1248,53 +1276,86 @@ class OrderBookAnalyzer:
             zones.append(current_zone)  # Add last zone
             return zones
 
+        # Get dynamic thresholds
+        zone_pct, major_threshold, minor_threshold = get_dynamic_thresholds(bids, asks, mid_price)
+        
         # Aggregate bids and asks into price zones
-        bid_zones = aggregate_orders_by_zone(bids)
-        ask_zones = aggregate_orders_by_zone(asks)
+        bid_zones = aggregate_orders_by_zone(bids, zone_pct)
+        ask_zones = aggregate_orders_by_zone(asks, zone_pct)
 
-        significant_bids = []
-        significant_asks = []
+        major_bids = []
+        minor_bids = []
+        major_asks = []
+        minor_asks = []
         
         # Analyze bid zones
         for zone in bid_zones:
             avg_price = (zone['min_price'] + zone['max_price']) / 2
             total_usdt = avg_price * zone['total_qty']
+            distance_pct = ((mid_price - avg_price) / mid_price) * 100
             
-            if total_usdt >= 50000:  # Minimum 50K USDT in the zone
-                distance_pct = ((mid_price - avg_price) / mid_price) * 100
-                significant_bids.append({
+            if total_usdt >= minor_threshold:
+                level_data = {
                     'price': avg_price,
                     'quantity': zone['total_qty'],
                     'distance_pct': distance_pct,
                     'usdt_value': total_usdt,
                     'order_count': len(zone['orders']),
-                    'price_range': f"${zone['min_price']:.2f} - ${zone['max_price']:.2f}"
-                })
+                    'strength': 'MAJOR' if total_usdt >= major_threshold else 'MINOR'
+                }
+                
+                if total_usdt >= major_threshold:
+                    major_bids.append(level_data)
+                else:
+                    minor_bids.append(level_data)
         
         # Analyze ask zones  
         for zone in ask_zones:
             avg_price = (zone['min_price'] + zone['max_price']) / 2
             total_usdt = avg_price * zone['total_qty']
+            distance_pct = ((avg_price - mid_price) / mid_price) * 100
             
-            if total_usdt >= 50000:  # Minimum 50K USDT in the zone
-                distance_pct = ((avg_price - mid_price) / mid_price) * 100
-                significant_asks.append({
+            if total_usdt >= minor_threshold:
+                level_data = {
                     'price': avg_price,
                     'quantity': zone['total_qty'],
                     'distance_pct': distance_pct,
                     'usdt_value': total_usdt,
                     'order_count': len(zone['orders']),
-                    'price_range': f"${zone['min_price']:.2f} - ${zone['max_price']:.2f}"
-                })
+                    'strength': 'MAJOR' if total_usdt >= major_threshold else 'MINOR'
+                }
+                
+                if total_usdt >= major_threshold:
+                    major_asks.append(level_data)
+                else:
+                    minor_asks.append(level_data)
 
-        significant_bids.sort(key=lambda x: x['distance_pct'])
-        significant_asks.sort(key=lambda x: x['distance_pct'])
+        # Sort by distance from current price
+        major_bids.sort(key=lambda x: x['distance_pct'])
+        minor_bids.sort(key=lambda x: x['distance_pct'])
+        major_asks.sort(key=lambda x: x['distance_pct'])
+        minor_asks.sort(key=lambda x: x['distance_pct'])
+
+        # Combine for backward compatibility
+        significant_bids = major_bids + minor_bids
+        significant_asks = major_asks + minor_asks
 
         return {
             'significant_bids': significant_bids[:10],
             'significant_asks': significant_asks[:10],
-            'large_bid_walls': len(significant_bids),
-            'large_ask_walls': len(significant_asks)
+            'major_bids': major_bids[:5],
+            'minor_bids': minor_bids[:5],
+            'major_asks': major_asks[:5],
+            'minor_asks': minor_asks[:5],
+            'large_bid_walls': len(major_bids),
+            'large_ask_walls': len(major_asks),
+            'total_bid_walls': len(significant_bids),
+            'total_ask_walls': len(significant_asks),
+            'thresholds': {
+                'major': major_threshold,
+                'minor': minor_threshold,
+                'zone_pct': zone_pct
+            }
         }
 
     def identify_significant_levels(self, bids: List[List[float]], asks: List[List[float]], mid_price: float) -> Dict:
@@ -1564,27 +1625,52 @@ class OrderBookAnalyzer:
         significant_bids = analysis.get('significant_bids', [])
         significant_asks = analysis.get('significant_asks', [])
         
-        if significant_bids:
-            report += f"\n🟢 <b>Key Support Levels:</b>\n"
-            for bid in significant_bids[:5]:  # Show top 5
-                # Use more decimals for low-price coins
-                decimals = 6 if bid['price'] < 1 else 4 if bid['price'] < 100 else 2
-                # Calculate USDT value at this level
-                usdt_value = bid['quantity'] * bid['price']
-                report += f"  ${bid['price']:.{decimals}f} ({bid['distance_pct']:.2f}% below) - ${usdt_value:,.0f} USDT\n"
-                
-        if significant_asks:
-            report += f"\n🔴 <b>Key Resistance Levels:</b>\n"
-            for ask in significant_asks[:5]:  # Show top 5
-                # Use more decimals for low-price coins
-                decimals = 6 if ask['price'] < 1 else 4 if ask['price'] < 100 else 2
-                # Calculate USDT value at this level
-                usdt_value = ask['quantity'] * ask['price']
-                report += f"  ${ask['price']:.{decimals}f} ({ask['distance_pct']:.2f}% above) - ${usdt_value:,.0f} USDT\n"
+        # Show major levels first, then minor levels
+        major_bids = analysis.get('major_bids', [])
+        minor_bids = analysis.get('minor_bids', [])
+        major_asks = analysis.get('major_asks', [])
+        minor_asks = analysis.get('minor_asks', [])
         
-        # Wall counts
+        if major_bids:
+            report += f"\n🟢 <b>MAJOR Support Levels:</b>\n"
+            for bid in major_bids[:3]:  # Show top 3 major
+                decimals = 6 if bid['price'] < 1 else 4 if bid['price'] < 100 else 2
+                usdt_value = bid['usdt_value']
+                report += f"  ${bid['price']:.{decimals}f} ({bid['distance_pct']:.2f}% below) - ${usdt_value:,.0f} USDT [{bid['order_count']} orders]\n"
+                
+        if minor_bids:
+            report += f"\n🔵 <b>Minor Support Levels:</b>\n"
+            for bid in minor_bids[:2]:  # Show top 2 minor
+                decimals = 6 if bid['price'] < 1 else 4 if bid['price'] < 100 else 2
+                usdt_value = bid['usdt_value']
+                report += f"  ${bid['price']:.{decimals}f} ({bid['distance_pct']:.2f}% below) - ${usdt_value:,.0f} USDT [{bid['order_count']} orders]\n"
+                
+        if major_asks:
+            report += f"\n🔴 <b>MAJOR Resistance Levels:</b>\n"
+            for ask in major_asks[:3]:  # Show top 3 major
+                decimals = 6 if ask['price'] < 1 else 4 if ask['price'] < 100 else 2
+                usdt_value = ask['usdt_value']
+                report += f"  ${ask['price']:.{decimals}f} ({ask['distance_pct']:.2f}% above) - ${usdt_value:,.0f} USDT [{ask['order_count']} orders]\n"
+                
+        if minor_asks:
+            report += f"\n🟠 <b>Minor Resistance Levels:</b>\n"
+            for ask in minor_asks[:2]:  # Show top 2 minor
+                decimals = 6 if ask['price'] < 1 else 4 if ask['price'] < 100 else 2
+                usdt_value = ask['usdt_value']
+                report += f"  ${ask['price']:.{decimals}f} ({ask['distance_pct']:.2f}% above) - ${usdt_value:,.0f} USDT [{ask['order_count']} orders]\n"
+        
+        # Wall counts and thresholds
+        thresholds = analysis.get('thresholds', {})
+        major_threshold = thresholds.get('major', 0)
+        minor_threshold = thresholds.get('minor', 0)
+        zone_pct = thresholds.get('zone_pct', 0)
+        
         if analysis.get('large_bid_walls', 0) > 0 or analysis.get('large_ask_walls', 0) > 0:
-            report += f"\n📊 Large Walls: {analysis.get('large_bid_walls', 0)} bids, {analysis.get('large_ask_walls', 0)} asks\n"
+            report += f"\n📊 Major Walls: {analysis.get('large_bid_walls', 0)} bids, {analysis.get('large_ask_walls', 0)} asks\n"
+            report += f"📈 Total Walls: {analysis.get('total_bid_walls', 0)} bids, {analysis.get('total_ask_walls', 0)} asks\n"
+            
+        if major_threshold > 0:
+            report += f"\n⚙️ Thresholds: Major ${major_threshold/1000:.0f}K+ | Minor ${minor_threshold/1000:.0f}K+ | Zone {zone_pct:.2f}%\n"
             
         # Liquidity and sentiment
         report += f"\n💧 Liquidity Score: {analysis.get('liquidity_score', 0):.0f}/100\n"
