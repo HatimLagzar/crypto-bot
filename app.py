@@ -1260,7 +1260,7 @@ class OrderBookAnalyzer:
             avg_price = (zone['min_price'] + zone['max_price']) / 2
             total_usdt = avg_price * zone['total_qty']
             
-            if total_usdt >= 1000000:  # Minimum 1M USDT in the zone
+            if total_usdt >= 50000:  # Minimum 50K USDT in the zone
                 distance_pct = ((mid_price - avg_price) / mid_price) * 100
                 significant_bids.append({
                     'price': avg_price,
@@ -1276,7 +1276,7 @@ class OrderBookAnalyzer:
             avg_price = (zone['min_price'] + zone['max_price']) / 2
             total_usdt = avg_price * zone['total_qty']
             
-            if total_usdt >= 1000000:  # Minimum 1M USDT in the zone
+            if total_usdt >= 50000:  # Minimum 50K USDT in the zone
                 distance_pct = ((avg_price - mid_price) / mid_price) * 100
                 significant_asks.append({
                     'price': avg_price,
@@ -1336,7 +1336,7 @@ class OrderBookAnalyzer:
             total_usdt = avg_price * zone['total_qty']
             distance_pct = ((mid_price - avg_price) / mid_price) * 100
             
-            if total_usdt >= 1000000 and distance_pct <= 5 and distance_pct >= 0:
+            if total_usdt >= 50000 and distance_pct <= 5 and distance_pct >= 0:
                 support_levels.append({
                     'price': avg_price,
                     'size': total_usdt,
@@ -1351,7 +1351,7 @@ class OrderBookAnalyzer:
             total_usdt = avg_price * zone['total_qty']
             distance_pct = ((avg_price - mid_price) / mid_price) * 100
             
-            if total_usdt >= 1000000 and distance_pct <= 5 and distance_pct >= 0:
+            if total_usdt >= 50000 and distance_pct <= 5 and distance_pct >= 0:
                 resistance_levels.append({
                     'price': avg_price,
                     'size': total_usdt,
