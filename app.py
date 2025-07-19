@@ -2426,9 +2426,9 @@ class EnhancedTelegramBot:
                 
                 for symbol in self.symbols:
                     try:
-                        # Get OHLCV data
-                        df = self.get_ohlcv(symbol)
-                        if df is None or len(df) < 200:  # Need enough data for EMA 200
+                        # Get OHLCV data with enough history for EMA 200
+                        df = self.get_ohlcv(symbol, timeframe='1h', limit=250)
+                        if df is None or len(df) < 50:  # Need minimum data for EMA calculations
                             continue
                         
                         # Calculate levels including EMAs
@@ -2436,6 +2436,11 @@ class EnhancedTelegramBot:
                         
                         # Detect EMA touches/crosses
                         ema_alerts = self.ema_analyzer.detect_ema_touches(df, symbol)
+                        
+                        # Debug logging
+                        if len(ema_alerts) == 0:
+                            current_price = df.iloc[-1]['close']
+                            logger.debug(f"EMA check: {symbol} price={current_price:.4f}, no alerts")
                         
                         # Send alerts
                         for alert in ema_alerts:
