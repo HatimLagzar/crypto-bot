@@ -1712,6 +1712,188 @@ class OrderBookAnalyzer:
             logger.error(f"Failed to store analysis: {e}")
 
 
+class EMAAnalyzer:
+    """EMA touch/cross detection and alerting"""
+    
+    def __init__(self):
+        self.db_path = "orderbook_data.db"
+        self.init_database()
+        self.ema_periods = [12, 20, 50, 100, 200]
+        self.last_ema_states = {}
+    
+    def init_database(self):
+        """Initialize EMA alerts database"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS ema_alerts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol TEXT,
+                ema_period INTEGER,
+                price REAL,
+                ema_value REAL,
+                alert_type TEXT,
+                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        conn.commit()
+        conn.close()
+    
+    def detect_ema_touches(self, df, symbol: str) -> List[Dict]:
+        """Detect when price touches or crosses EMAs"""
+        if len(df) < 2:
+            return []
+        
+        alerts = []
+        current = df.iloc[-1]
+        previous = df.iloc[-2]
+        
+        for period in self.ema_periods:
+            ema_col = f'ema_{period}'
+            if ema_col not in df.columns:
+                continue
+                
+            current_ema = current[ema_col]
+            previous_ema = previous[ema_col]
+            current_price = current['close']
+            previous_price = previous['close']
+            
+            if pd.isna(current_ema) or pd.isna(previous_ema):
+                continue
+            
+            # Check for touch (price within 0.1% of EMA)
+            touch_threshold = current_ema * 0.001  # 0.1%
+            is_touching = abs(current_price - current_ema) <= touch_threshold
+            
+            # Check for cross
+            crossed_above = (previous_price <= previous_ema and current_price > current_ema)
+            crossed_below = (previous_price >= previous_ema and current_price < current_ema)
+            
+            # Determine alert type
+            alert_type = None
+            if crossed_above:
+                alert_type = "CROSS_ABOVE"
+            elif crossed_below:
+                alert_type = "CROSS_BELOW"
+            elif is_touching and not self._was_touching_recently(symbol, period):
+                if current_price > current_ema:
+                    alert_type = "TOUCH_FROM_ABOVE"
+                else:
+                    alert_type = "TOUCH_FROM_BELOW"
+            
+            if alert_type:
+                alerts.append({
+                    'symbol': symbol,
+                    'ema_period': period,
+                    'price': current_price,
+                    'ema_value': current_ema,
+                    'alert_type': alert_type,
+                    'rsi': current.get('rsi', 0),
+                    'volume_ratio': current.get('volume_ratio', 1)
+                })
+                
+                # Store alert in database
+                self._store_ema_alert(symbol, period, current_price, current_ema, alert_type)
+        
+        return alerts
+    
+    def _was_touching_recently(self, symbol: str, period: int) -> bool:
+        """Check if we already alerted for this EMA touch recently"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT COUNT(*) FROM ema_alerts 
+                WHERE symbol = ? AND ema_period = ? 
+                AND alert_type LIKE 'TOUCH%'
+                AND timestamp > datetime('now', '-1 hour')
+            ''', (symbol, period))
+            result = cursor.fetchone()
+            conn.close()
+            return result[0] > 0
+        except Exception:
+            return False
+    
+    def _store_ema_alert(self, symbol: str, period: int, price: float, ema_value: float, alert_type: str):
+        """Store EMA alert in database"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute('''
+                INSERT INTO ema_alerts (symbol, ema_period, price, ema_value, alert_type)
+                VALUES (?, ?, ?, ?, ?)
+            ''', (symbol, period, price, ema_value, alert_type))
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            logger.error(f"Failed to store EMA alert: {e}")
+    
+    def generate_ema_alert(self, alert: Dict) -> str:
+        """Generate EMA alert message"""
+        symbol = alert['symbol']
+        period = alert['ema_period']
+        price = alert['price']
+        ema_value = alert['ema_value']
+        alert_type = alert['alert_type']
+        rsi = alert.get('rsi', 0)
+        volume_ratio = alert.get('volume_ratio', 1)
+        
+        # Emoji mapping
+        emoji_map = {
+            'CROSS_ABOVE': '🚀',
+            'CROSS_BELOW': '📉',
+            'TOUCH_FROM_ABOVE': '🎯',
+            'TOUCH_FROM_BELOW': '🎯'
+        }
+        
+        emoji = emoji_map.get(alert_type, '📊')
+        
+        # Format message based on alert type
+        if 'CROSS' in alert_type:
+            action = "CROSSED ABOVE" if "ABOVE" in alert_type else "CROSSED BELOW"
+            alert_msg = f"{emoji} <b>EMA CROSS ALERT</b>\n\n"
+        else:
+            action = "TOUCHING"
+            alert_msg = f"{emoji} <b>EMA TOUCH ALERT</b>\n\n"
+        
+        alert_msg += f"💎 Symbol: <b>{symbol}</b>\n"
+        alert_msg += f"📈 Price: ${price:.6f if price < 1 else price:.4f if price < 100 else price:.2f}\n"
+        alert_msg += f"📊 EMA-{period}: ${ema_value:.6f if ema_value < 1 else ema_value:.4f if ema_value < 100 else ema_value:.2f}\n"
+        alert_msg += f"🎯 Action: <b>{action} EMA-{period}</b>\n"
+        
+        # Add technical context
+        if rsi > 0:
+            alert_msg += f"📈 RSI: {rsi:.1f}\n"
+        if volume_ratio > 1:
+            alert_msg += f"📊 Volume: {volume_ratio:.1f}x average\n"
+        
+        # Add interpretation
+        alert_msg += "\n💡 <b>Interpretation:</b>\n"
+        
+        if alert_type == "CROSS_ABOVE":
+            if period in [12, 20]:
+                alert_msg += "🚀 <i>Short-term bullish momentum</i>\n"
+            elif period in [50, 100]:
+                alert_msg += "📈 <i>Medium-term trend turning bullish</i>\n"
+            else:  # 200
+                alert_msg += "🔥 <i>Long-term trend reversal - major bullish signal</i>\n"
+        elif alert_type == "CROSS_BELOW":
+            if period in [12, 20]:
+                alert_msg += "📉 <i>Short-term bearish momentum</i>\n"
+            elif period in [50, 100]:
+                alert_msg += "⚠️ <i>Medium-term trend turning bearish</i>\n"
+            else:  # 200
+                alert_msg += "🔴 <i>Long-term trend reversal - major bearish signal</i>\n"
+        else:  # TOUCH
+            if period in [50, 100, 200]:
+                alert_msg += "⚖️ <i>Testing key support/resistance level</i>\n"
+                alert_msg += "👀 <i>Watch for bounce or break</i>"
+            else:
+                alert_msg += "🎯 <i>Price interacting with dynamic level</i>"
+        
+        return alert_msg
+
+
 class EnhancedTelegramBot:
     def __init__(self, bot_token, chat_id):
         self.bot = Bot(token=bot_token)
@@ -1732,10 +1914,12 @@ class EnhancedTelegramBot:
         self.dominance_analyzer = USDTDominanceAnalyzer()
         self.volume_analyzer = VolumeSurgeAnalyzer()
         self.setup_analyzer = OrderBookSetupAnalyzer()
+        self.ema_analyzer = EMAAnalyzer()
         self.last_macd_hist = None
         self.last_vwap_price = None
         self.dominance_running = False
         self.volume_surge_running = False
+        self.ema_running = False
         self.setup_running = False
         self.last_dominance_sentiment = None
 
@@ -1758,8 +1942,12 @@ class EnhancedTelegramBot:
         df['sma_20'] = df['close'].rolling(window=20).mean()
         df['sma_50'] = df['close'].rolling(window=50).mean()
         
-        # Calculate EMA
+        # Calculate EMAs
+        df['ema_12'] = df['close'].ewm(span=12).mean()
         df['ema_20'] = df['close'].ewm(span=20).mean()
+        df['ema_50'] = df['close'].ewm(span=50).mean()
+        df['ema_100'] = df['close'].ewm(span=100).mean()
+        df['ema_200'] = df['close'].ewm(span=200).mean()
         
         # Calculate RSI
         delta = df['close'].diff()
@@ -2229,6 +2417,48 @@ class EnhancedTelegramBot:
                 
             await asyncio.sleep(3600)  # Check every hour
 
+    async def ema_monitor(self):
+        """Monitor EMA touches and crosses"""
+        while self.ema_running:
+            try:
+                logger.info("Starting EMA monitoring cycle...")
+                alert_count = 0
+                
+                for symbol in self.symbols:
+                    try:
+                        # Get OHLCV data
+                        df = self.get_ohlcv(symbol)
+                        if df is None or len(df) < 200:  # Need enough data for EMA 200
+                            continue
+                        
+                        # Calculate levels including EMAs
+                        df = self.calculate_levels(df)
+                        
+                        # Detect EMA touches/crosses
+                        ema_alerts = self.ema_analyzer.detect_ema_touches(df, symbol)
+                        
+                        # Send alerts
+                        for alert in ema_alerts:
+                            alert_message = self.ema_analyzer.generate_ema_alert(alert)
+                            await self.send_alert(alert_message)
+                            alert_count += 1
+                            
+                            logger.info(f"EMA alert: {symbol} {alert['alert_type']} EMA-{alert['ema_period']}")
+                            
+                    except Exception as e:
+                        logger.error(f"EMA analysis error for {symbol}: {e}")
+                        continue
+                        
+                if alert_count > 0:
+                    logger.info(f"EMA monitoring completed: {alert_count} alerts sent")
+                else:
+                    logger.info("EMA monitoring completed: No EMA touches detected")
+                    
+            except Exception as e:
+                logger.error(f"EMA monitoring error: {e}")
+                
+            await asyncio.sleep(60)  # Check every minute
+
     async def start_monitoring(self):
         """Start both breakout and order book monitoring"""
         if self.running:
@@ -2239,6 +2469,7 @@ class EnhancedTelegramBot:
         self.orderbook_running = True
         self.dominance_running = True
         self.volume_surge_running = True
+        self.ema_running = True
         self.setup_running = True
         
         logger.info("Starting enhanced monitoring...")
@@ -2263,6 +2494,10 @@ class EnhancedTelegramBot:
         setup_task = asyncio.create_task(self.setup_monitor())
         logger.info("Setup monitoring started")
         
+        # Start EMA monitoring task
+        ema_task = asyncio.create_task(self.ema_monitor())
+        logger.info("EMA monitoring started")
+        
         # Send startup notification
         await self.send_alert(
             "🤖 <b>Enhanced Crypto Bot Started</b>\n\n"
@@ -2270,11 +2505,12 @@ class EnhancedTelegramBot:
             "📊 Order book analysis: ACTIVE\n"
             "🎯 USDT.D sentiment: ACTIVE\n"
             "📈 Volume surge alerts: ACTIVE\n"
-            "⚡ Setup detection: ACTIVE\n\n"
+            "⚡ Setup detection: ACTIVE\n"
+            "🎯 EMA alerts: ACTIVE\n\n"
             f"Monitoring {len(self.symbols)} symbols"
         )
         
-        return breakout_task, orderbook_task, dominance_task, volume_task, setup_task
+        return breakout_task, orderbook_task, dominance_task, volume_task, setup_task, ema_task
 
     async def breakout_monitor(self):
         """Monitor breakouts at candle close"""
@@ -2305,6 +2541,7 @@ class EnhancedTelegramBot:
         self.orderbook_running = False
         self.dominance_running = False
         self.volume_surge_running = False
+        self.ema_running = False
 
 
 # Bot command handlers
@@ -2342,12 +2579,14 @@ async def status_command(update, context: ContextTypes.DEFAULT_TYPE):
         orderbook_status = "🟢 Running" if bot_instance.orderbook_running else "🔴 Stopped"
         dominance_status = "🟢 Running" if bot_instance.dominance_running else "🔴 Stopped"
         volume_status = "🟢 Running" if bot_instance.volume_surge_running else "🔴 Stopped"
+        ema_status = "🟢 Running" if bot_instance.ema_running else "🔴 Stopped"
         await update.message.reply_text(
             f"<b>Bot Status:</b>\n"
             f"🚀 Breakouts: {breakout_status}\n"
             f"📊 Order Book: {orderbook_status}\n"
             f"🎯 USDT.D Sentiment: {dominance_status}\n"
-            f"📈 Volume Surges: {volume_status}",
+            f"📈 Volume Surges: {volume_status}\n"
+            f"🎯 EMA Alerts: {ema_status}",
             parse_mode='HTML'
         )
     else:
