@@ -1898,6 +1898,178 @@ class EMAAnalyzer:
         return alert_msg
 
 
+class RSIAnalyzer:
+    """RSI overbought/oversold detection and alerting"""
+    
+    def __init__(self):
+        self.db_path = "orderbook_data.db"
+        self.init_database()
+        self.overbought_threshold = 70
+        self.oversold_threshold = 30
+        self.last_rsi_states = {}
+    
+    def init_database(self):
+        """Initialize RSI alerts database"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS rsi_alerts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol TEXT,
+                rsi_value REAL,
+                price REAL,
+                alert_type TEXT,
+                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        conn.commit()
+        conn.close()
+    
+    def detect_rsi_signals(self, df, symbol: str) -> List[Dict]:
+        """Detect RSI overbought/oversold conditions"""
+        if len(df) < 2 or 'rsi' not in df.columns:
+            return []
+        
+        alerts = []
+        current = df.iloc[-1]
+        previous = df.iloc[-2]
+        
+        current_rsi = current['rsi']
+        previous_rsi = previous['rsi']
+        current_price = current['close']
+        
+        if pd.isna(current_rsi) or pd.isna(previous_rsi):
+            return []
+        
+        # Check for RSI entering overbought territory
+        if current_rsi >= self.overbought_threshold and previous_rsi < self.overbought_threshold:
+            if not self._was_alerted_recently(symbol, 'OVERBOUGHT'):
+                alerts.append({
+                    'symbol': symbol,
+                    'rsi_value': current_rsi,
+                    'price': current_price,
+                    'alert_type': 'OVERBOUGHT',
+                    'volume_ratio': current.get('volume_ratio', 1)
+                })
+                self._store_rsi_alert(symbol, current_rsi, current_price, 'OVERBOUGHT')
+        
+        # Check for RSI entering oversold territory
+        elif current_rsi <= self.oversold_threshold and previous_rsi > self.oversold_threshold:
+            if not self._was_alerted_recently(symbol, 'OVERSOLD'):
+                alerts.append({
+                    'symbol': symbol,
+                    'rsi_value': current_rsi,
+                    'price': current_price,
+                    'alert_type': 'OVERSOLD',
+                    'volume_ratio': current.get('volume_ratio', 1)
+                })
+                self._store_rsi_alert(symbol, current_rsi, current_price, 'OVERSOLD')
+        
+        # Check for RSI exiting extreme territories (potential reversal signals)
+        elif previous_rsi >= self.overbought_threshold and current_rsi < self.overbought_threshold:
+            if not self._was_alerted_recently(symbol, 'EXIT_OVERBOUGHT'):
+                alerts.append({
+                    'symbol': symbol,
+                    'rsi_value': current_rsi,
+                    'price': current_price,
+                    'alert_type': 'EXIT_OVERBOUGHT',
+                    'volume_ratio': current.get('volume_ratio', 1)
+                })
+                self._store_rsi_alert(symbol, current_rsi, current_price, 'EXIT_OVERBOUGHT')
+        
+        elif previous_rsi <= self.oversold_threshold and current_rsi > self.oversold_threshold:
+            if not self._was_alerted_recently(symbol, 'EXIT_OVERSOLD'):
+                alerts.append({
+                    'symbol': symbol,
+                    'rsi_value': current_rsi,
+                    'price': current_price,
+                    'alert_type': 'EXIT_OVERSOLD',
+                    'volume_ratio': current.get('volume_ratio', 1)
+                })
+                self._store_rsi_alert(symbol, current_rsi, current_price, 'EXIT_OVERSOLD')
+        
+        return alerts
+    
+    def _was_alerted_recently(self, symbol: str, alert_type: str) -> bool:
+        """Check if we already alerted for this RSI condition recently"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT COUNT(*) FROM rsi_alerts 
+                WHERE symbol = ? AND alert_type = ?
+                AND timestamp > datetime('now', '-2 hours')
+            ''', (symbol, alert_type))
+            
+            count = cursor.fetchone()[0]
+            conn.close()
+            return count > 0
+        except Exception as e:
+            logger.error(f"Error checking recent RSI alerts: {e}")
+            return False
+    
+    def _store_rsi_alert(self, symbol: str, rsi_value: float, price: float, alert_type: str):
+        """Store RSI alert in database"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute('''
+                INSERT INTO rsi_alerts (symbol, rsi_value, price, alert_type)
+                VALUES (?, ?, ?, ?)
+            ''', (symbol, rsi_value, price, alert_type))
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            logger.error(f"Error storing RSI alert: {e}")
+    
+    def format_rsi_alert(self, alert: Dict) -> str:
+        """Format RSI alert message for Telegram"""
+        symbol = alert['symbol']
+        rsi_value = alert['rsi_value']
+        price = alert['price']
+        alert_type = alert['alert_type']
+        volume_ratio = alert.get('volume_ratio', 1)
+        
+        # Base message
+        if alert_type == 'OVERBOUGHT':
+            alert_msg = f"🔴 <b>RSI OVERBOUGHT</b> 🔴\n"
+            alert_msg += f"🪙 <b>{symbol}</b>\n"
+            alert_msg += f"💰 Price: <b>${price:.4f}</b>\n"
+            alert_msg += f"📊 RSI: <b>{rsi_value:.1f}</b> (>{self.overbought_threshold})\n"
+            alert_msg += f"📈 Volume: <b>{volume_ratio:.1f}x</b>\n\n"
+            alert_msg += "⚠️ <i>Potential selling pressure ahead</i>\n"
+            alert_msg += "🎯 <i>Consider taking profits or wait for pullback</i>"
+            
+        elif alert_type == 'OVERSOLD':
+            alert_msg = f"🟢 <b>RSI OVERSOLD</b> 🟢\n"
+            alert_msg += f"🪙 <b>{symbol}</b>\n"
+            alert_msg += f"💰 Price: <b>${price:.4f}</b>\n"
+            alert_msg += f"📊 RSI: <b>{rsi_value:.1f}</b> (<{self.oversold_threshold})\n"
+            alert_msg += f"📈 Volume: <b>{volume_ratio:.1f}x</b>\n\n"
+            alert_msg += "💎 <i>Potential buying opportunity</i>\n"
+            alert_msg += "🎯 <i>Consider entry or wait for reversal confirmation</i>"
+            
+        elif alert_type == 'EXIT_OVERBOUGHT':
+            alert_msg = f"🟡 <b>RSI RECOVERY</b> 🟡\n"
+            alert_msg += f"🪙 <b>{symbol}</b>\n"
+            alert_msg += f"💰 Price: <b>${price:.4f}</b>\n"
+            alert_msg += f"📊 RSI: <b>{rsi_value:.1f}</b> (cooling down)\n"
+            alert_msg += f"📈 Volume: <b>{volume_ratio:.1f}x</b>\n\n"
+            alert_msg += "🔄 <i>Exiting overbought territory</i>\n"
+            alert_msg += "👀 <i>Potential continuation or reversal</i>"
+            
+        elif alert_type == 'EXIT_OVERSOLD':
+            alert_msg = f"🟡 <b>RSI RECOVERY</b> 🟡\n"
+            alert_msg += f"🪙 <b>{symbol}</b>\n"
+            alert_msg += f"💰 Price: <b>${price:.4f}</b>\n"
+            alert_msg += f"📊 RSI: <b>{rsi_value:.1f}</b> (recovering)\n"
+            alert_msg += f"📈 Volume: <b>{volume_ratio:.1f}x</b>\n\n"
+            alert_msg += "🔄 <i>Exiting oversold territory</i>\n"
+            alert_msg += "🚀 <i>Potential bullish momentum building</i>"
+        
+        return alert_msg
+
+
 class EnhancedTelegramBot:
     def __init__(self, bot_token, chat_id):
         self.bot = Bot(token=bot_token)
@@ -1919,11 +2091,13 @@ class EnhancedTelegramBot:
         self.volume_analyzer = VolumeSurgeAnalyzer()
         self.setup_analyzer = OrderBookSetupAnalyzer()
         self.ema_analyzer = EMAAnalyzer()
+        self.rsi_analyzer = RSIAnalyzer()
         self.last_macd_hist = None
         self.last_vwap_price = None
         self.dominance_running = False
         self.volume_surge_running = False
         self.ema_running = False
+        self.rsi_running = False
         self.setup_running = False
         self.last_dominance_sentiment = None
 
@@ -2474,6 +2648,59 @@ class EnhancedTelegramBot:
                 
             await asyncio.sleep(60)  # Check every minute
 
+    async def rsi_monitor(self):
+        """Monitor RSI overbought/oversold conditions"""
+        while self.rsi_running:
+            try:
+                logger.info("Starting RSI monitoring cycle...")
+                alert_count = 0
+                
+                for symbol in self.symbols:
+                    try:
+                        # Get OHLCV data with enough history for RSI calculations
+                        df = self.get_ohlcv(symbol, timeframe='1h', limit=50)
+                        if df is None or len(df) < 15:  # Need minimum data for RSI-14 calculations
+                            logger.warning(f"Insufficient data for {symbol}: {len(df) if df is not None else 0} candles (need 15+)")
+                            continue
+                        
+                        # Calculate levels including RSI
+                        df = self.calculate_levels(df)
+                        
+                        # Detect RSI signals
+                        rsi_alerts = self.rsi_analyzer.detect_rsi_signals(df, symbol)
+                        
+                        # Debug logging
+                        if len(rsi_alerts) == 0:
+                            current_rsi = df.iloc[-1]['rsi']
+                            logger.debug(f"RSI check: {symbol} RSI={current_rsi:.1f}, no alerts")
+                        else:
+                            logger.info(f"Found {len(rsi_alerts)} RSI alerts for {symbol}")
+                        
+                        # Send alerts
+                        for alert in rsi_alerts:
+                            try:
+                                alert_message = self.rsi_analyzer.format_rsi_alert(alert)
+                                await self.send_alert(alert_message)
+                                alert_count += 1
+                                
+                                logger.info(f"RSI alert sent: {symbol} {alert['alert_type']} RSI={alert['rsi_value']:.1f}")
+                            except Exception as alert_error:
+                                logger.error(f"Failed to send RSI alert for {symbol}: {alert_error}")
+                            
+                    except Exception as e:
+                        logger.error(f"RSI analysis error for {symbol}: {e}", exc_info=True)
+                        continue
+                        
+                if alert_count > 0:
+                    logger.info(f"RSI monitoring completed: {alert_count} alerts sent")
+                else:
+                    logger.info("RSI monitoring completed: No RSI signals detected")
+                    
+            except Exception as e:
+                logger.error(f"RSI monitoring error: {e}")
+                
+            await asyncio.sleep(300)  # Check every 5 minutes
+
     async def start_monitoring(self):
         """Start both breakout and order book monitoring"""
         if self.running:
@@ -2485,6 +2712,7 @@ class EnhancedTelegramBot:
         self.dominance_running = True
         self.volume_surge_running = True
         self.ema_running = True
+        self.rsi_running = True
         self.setup_running = True
         
         logger.info("Starting enhanced monitoring...")
@@ -2513,6 +2741,10 @@ class EnhancedTelegramBot:
         ema_task = asyncio.create_task(self.ema_monitor())
         logger.info("EMA monitoring started")
         
+        # Start RSI monitoring task
+        rsi_task = asyncio.create_task(self.rsi_monitor())
+        logger.info("RSI monitoring started")
+        
         # Send startup notification
         await self.send_alert(
             "🤖 <b>Enhanced Crypto Bot Started</b>\n\n"
@@ -2521,11 +2753,12 @@ class EnhancedTelegramBot:
             "🎯 USDT.D sentiment: ACTIVE\n"
             "📈 Volume surge alerts: ACTIVE\n"
             "⚡ Setup detection: ACTIVE\n"
-            "🎯 EMA alerts: ACTIVE\n\n"
+            "🎯 EMA alerts: ACTIVE\n"
+            "📊 RSI alerts: ACTIVE\n\n"
             f"Monitoring {len(self.symbols)} symbols"
         )
         
-        return breakout_task, orderbook_task, dominance_task, volume_task, setup_task, ema_task
+        return breakout_task, orderbook_task, dominance_task, volume_task, setup_task, ema_task, rsi_task
 
     async def breakout_monitor(self):
         """Monitor breakouts at candle close"""
@@ -2557,6 +2790,7 @@ class EnhancedTelegramBot:
         self.dominance_running = False
         self.volume_surge_running = False
         self.ema_running = False
+        self.rsi_running = False
 
 
 # Bot command handlers
@@ -2595,13 +2829,15 @@ async def status_command(update, context: ContextTypes.DEFAULT_TYPE):
         dominance_status = "🟢 Running" if bot_instance.dominance_running else "🔴 Stopped"
         volume_status = "🟢 Running" if bot_instance.volume_surge_running else "🔴 Stopped"
         ema_status = "🟢 Running" if bot_instance.ema_running else "🔴 Stopped"
+        rsi_status = "🟢 Running" if bot_instance.rsi_running else "🔴 Stopped"
         await update.message.reply_text(
             f"<b>Bot Status:</b>\n"
             f"🚀 Breakouts: {breakout_status}\n"
             f"📊 Order Book: {orderbook_status}\n"
             f"🎯 USDT.D Sentiment: {dominance_status}\n"
             f"📈 Volume Surges: {volume_status}\n"
-            f"🎯 EMA Alerts: {ema_status}",
+            f"🎯 EMA Alerts: {ema_status}\n"
+            f"📊 RSI Alerts: {rsi_status}",
             parse_mode='HTML'
         )
     else:
