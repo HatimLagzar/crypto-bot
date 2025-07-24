@@ -1765,9 +1765,13 @@ class EMAAnalyzer:
             touch_threshold = current_ema * 0.001  # 0.1%
             is_touching = abs(current_price - current_ema) <= touch_threshold
             
-            # Check for cross
+            # Check for cross - price crossing EMA line
             crossed_above = (previous_price <= previous_ema and current_price > current_ema)
             crossed_below = (previous_price >= previous_ema and current_price < current_ema)
+            
+            # Debug logging for crosses
+            if crossed_above or crossed_below:
+                logger.info(f"EMA cross detected: {symbol} EMA-{period} - prev_price:{previous_price:.2f} curr_price:{current_price:.2f} prev_ema:{previous_ema:.2f} curr_ema:{current_ema:.2f}")
             
             # Determine alert type
             alert_type = None
@@ -2428,7 +2432,8 @@ class EnhancedTelegramBot:
                     try:
                         # Get OHLCV data with enough history for EMA 200
                         df = self.get_ohlcv(symbol, timeframe='1h', limit=250)
-                        if df is None or len(df) < 50:  # Need minimum data for EMA calculations
+                        if df is None or len(df) < 200:  # Need minimum data for EMA-200 calculations
+                            logger.warning(f"Insufficient data for {symbol}: {len(df) if df is not None else 0} candles (need 200+)")
                             continue
                         
                         # Calculate levels including EMAs
@@ -2441,17 +2446,22 @@ class EnhancedTelegramBot:
                         if len(ema_alerts) == 0:
                             current_price = df.iloc[-1]['close']
                             logger.debug(f"EMA check: {symbol} price={current_price:.4f}, no alerts")
+                        else:
+                            logger.info(f"Found {len(ema_alerts)} EMA alerts for {symbol}")
                         
                         # Send alerts
                         for alert in ema_alerts:
-                            alert_message = self.ema_analyzer.generate_ema_alert(alert)
-                            await self.send_alert(alert_message)
-                            alert_count += 1
-                            
-                            logger.info(f"EMA alert: {symbol} {alert['alert_type']} EMA-{alert['ema_period']}")
+                            try:
+                                alert_message = self.ema_analyzer.generate_ema_alert(alert)
+                                await self.send_alert(alert_message)
+                                alert_count += 1
+                                
+                                logger.info(f"EMA alert sent: {symbol} {alert['alert_type']} EMA-{alert['ema_period']}")
+                            except Exception as alert_error:
+                                logger.error(f"Failed to send EMA alert for {symbol}: {alert_error}")
                             
                     except Exception as e:
-                        logger.error(f"EMA analysis error for {symbol}: {e}")
+                        logger.error(f"EMA analysis error for {symbol}: {e}", exc_info=True)
                         continue
                         
                 if alert_count > 0:
