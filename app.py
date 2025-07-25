@@ -2079,7 +2079,7 @@ class EnhancedTelegramBot:
             'BTC/USDT', 'ETH/USDT', 'BNB/USDT', 'ADA/USDT', 'SOL/USDT',
             'HYPE/USDT', 'PENGU/USDT', 'XRP/USDT', 'MKR/USDT', 'AAVE/USDT',
             'DOGE/USDT', 'APT/USDT', 'XLM/USDT', 'QNT/USDT', 'SUI/USDT',
-            'WIF/USDT', 'TON/USDT', 'KAITO/USDT', 'LINK/USDT'
+            'WIF/USDT', 'TON/USDT', 'KAITO/USDT', 'LINK/USDT', 'BCH/USDT'
         ]
         self.lookback = 20
         self.volume_threshold = 1.5
