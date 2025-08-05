@@ -1761,17 +1761,19 @@ class EMAAnalyzer:
             if pd.isna(current_ema) or pd.isna(previous_ema):
                 continue
             
-            # Check for touch (price within 0.1% of EMA)
-            touch_threshold = current_ema * 0.001  # 0.1%
+            # Check for touch (price within 0.2% of EMA) - increased threshold for crypto volatility
+            touch_threshold = current_ema * 0.002  # 0.2%
             is_touching = abs(current_price - current_ema) <= touch_threshold
             
             # Check for cross - price crossing EMA line
-            crossed_above = (previous_price <= previous_ema and current_price > current_ema)
-            crossed_below = (previous_price >= previous_ema and current_price < current_ema)
+            crossed_above = (previous_price < previous_ema and current_price > current_ema)
+            crossed_below = (previous_price > previous_ema and current_price < current_ema)
             
-            # Debug logging for crosses
+            # Enhanced debug logging
             if crossed_above or crossed_below:
-                logger.info(f"EMA cross detected: {symbol} EMA-{period} - prev_price:{previous_price:.2f} curr_price:{current_price:.2f} prev_ema:{previous_ema:.2f} curr_ema:{current_ema:.2f}")
+                logger.info(f"🚨 EMA CROSS DETECTED: {symbol} EMA-{period} - prev_price:{previous_price:.4f} curr_price:{current_price:.4f} prev_ema:{previous_ema:.4f} curr_ema:{current_ema:.4f}")
+            elif is_touching:
+                logger.debug(f"📍 EMA TOUCH: {symbol} EMA-{period} - price:{current_price:.4f} ema:{current_ema:.4f} diff:{abs(current_price - current_ema):.4f} threshold:{touch_threshold:.4f}")
             
             # Determine alert type
             alert_type = None
