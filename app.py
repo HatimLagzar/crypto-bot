@@ -2467,10 +2467,13 @@ class EnhancedTelegramBot:
                         current_sentiment = analysis['sentiment']
                         signal_strength = analysis['signal_strength']
                         
-                        # Only alert on sentiment changes or strong signals
+                        # Only alert on sentiment changes (excluding WEAK) or strong signals
                         should_alert = (
-                            self.last_dominance_sentiment != current_sentiment or
-                            signal_strength == "STRONG"
+                            (
+                                self.last_dominance_sentiment != current_sentiment
+                                and signal_strength != "WEAK"
+                            )
+                            or signal_strength == "STRONG"
                         )
                         
                         if should_alert:
