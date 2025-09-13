@@ -622,6 +622,221 @@ class VolumeSurgeAnalyzer:
             logger.error(f"Failed to store volume surge: {e}")
 
 
+class CapitalRotationAnalyzer:
+    """Detect capital rotation (volume flow) between assets."""
+
+    def __init__(self):
+        self.db_path = "rotation_data.db"
+        self.init_database()
+
+    def init_database(self):
+        """Initialize database for capital rotation events"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS capital_rotation (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    timeframe TEXT,
+                    from_symbol TEXT,
+                    to_symbol TEXT,
+                    inflow_ratio REAL,
+                    outflow_ratio REAL,
+                    inflow_momentum REAL,
+                    outflow_momentum REAL,
+                    score REAL,
+                    note TEXT
+                )
+            ''')
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            logger.error(f"Failed to init rotation DB: {e}")
+
+    def _symbol_metrics(self, df: pd.DataFrame) -> Optional[Dict]:
+        """Compute quote-volume ratio and short-term momentum for a symbol."""
+        if df is None or len(df) < 25:
+            return None
+
+        data = df.copy()
+        # Quote volume in USDT terms for cross-asset comparability
+        data['quote_volume'] = data['volume'] * data['close']
+        data['quote_vol_sma'] = data['quote_volume'].rolling(window=20).mean()
+        if pd.isna(data['quote_vol_sma'].iloc[-1]):
+            return None
+
+        quote_vol_ratio = data['quote_volume'].iloc[-1] / data['quote_vol_sma'].iloc[-1]
+
+        # Short-term momentum (3 bars if possible, else 1)
+        momentum_window = 3 if len(data) >= 4 else 1
+        try:
+            momentum = data['close'].pct_change(periods=momentum_window).iloc[-1]
+        except Exception:
+            momentum = 0.0
+
+        return {
+            'quote_vol_ratio': float(quote_vol_ratio),
+            'momentum': float(0.0 if pd.isna(momentum) else momentum),
+            'last_close': float(data['close'].iloc[-1])
+        }
+
+    def _score_rotation_pair(self, inflow: Dict, outflow: Dict) -> int:
+        """Score a rotation pair from outflow->inflow (0-100)."""
+        in_r = max(0.0, inflow['quote_vol_ratio'])
+        out_r = max(0.0, outflow['quote_vol_ratio'])
+        in_m = inflow['momentum']
+        out_m = outflow['momentum']
+
+        # Components clamped to [0,1]
+        in_comp = max(0.0, min(1.0, (in_r - 1.0) / 1.0))                # 1x->2x maps 0..1
+        out_comp = max(0.0, min(1.0, (1.0 - out_r) / 1.0))               # 1x->0x maps 0..1
+        mom_diff = in_m - out_m
+        mom_comp = max(0.0, min(1.0, mom_diff / 0.05))                   # 0%..5% diff maps 0..1
+
+        score = 100.0 * (0.4 * in_comp + 0.4 * out_comp + 0.2 * mom_comp)
+        return int(round(max(0, min(100, score))))
+
+    def analyze_rotation(self, symbols: List[str], get_ohlcv_callable, timeframe: str = '1h') -> Optional[Dict]:
+        """Analyze rotation across symbols using quote-volume ratios and momentum.
+
+        Returns dict with inflows, outflows, and paired flows with scores.
+        """
+        metrics = {}
+        for symbol in symbols:
+            try:
+                df = get_ohlcv_callable(symbol, timeframe=timeframe, limit=60)
+                m = self._symbol_metrics(df)
+                if m:
+                    metrics[symbol] = m
+            except Exception as e:
+                logger.debug(f"Rotation metrics failed for {symbol}: {e}")
+                continue
+
+        if not metrics:
+            return None
+
+        # Classify inflow/outflow candidates
+        # Thresholds chosen to reduce noise across 1h bars
+        inflow_candidates = [
+            {
+                'symbol': s,
+                **m
+            } for s, m in metrics.items()
+            if m['quote_vol_ratio'] >= 1.5 and m['momentum'] >= 0.003
+        ]
+        outflow_candidates = [
+            {
+                'symbol': s,
+                **m
+            } for s, m in metrics.items()
+            if m['quote_vol_ratio'] <= 0.8 and m['momentum'] <= -0.003
+        ]
+
+        inflow_candidates.sort(key=lambda x: (x['quote_vol_ratio'], x['momentum']), reverse=True)
+        outflow_candidates.sort(key=lambda x: (x['quote_vol_ratio'], x['momentum']))
+
+        # Pair top inflows with top outflows (up to 3 pairs)
+        pairs = []
+        for i in range(min(3, len(inflow_candidates), len(outflow_candidates))):
+            inflow = inflow_candidates[i]
+            outflow = outflow_candidates[i]
+            score = self._score_rotation_pair(inflow, outflow)
+            pairs.append({
+                'from_symbol': outflow['symbol'],
+                'to_symbol': inflow['symbol'],
+                'inflow_ratio': inflow['quote_vol_ratio'],
+                'outflow_ratio': outflow['quote_vol_ratio'],
+                'inflow_momentum': inflow['momentum'],
+                'outflow_momentum': outflow['momentum'],
+                'score': score
+            })
+
+        return {
+            'timeframe': timeframe,
+            'generated_at': datetime.now(),
+            'universe': len(metrics),
+            'inflows': inflow_candidates[:5],
+            'outflows': outflow_candidates[:5],
+            'pairs': pairs
+        }
+
+    def generate_rotation_alert(self, analysis: Dict, min_score: int = 60) -> Optional[str]:
+        """Build a human-friendly rotation alert message."""
+        pairs = [p for p in analysis.get('pairs', []) if p['score'] >= min_score]
+        if not pairs:
+            return None
+
+        tf = analysis.get('timeframe', '1h')
+        header = f"🔄 <b>Capital Rotation Detected</b> ({tf})\n\n"
+        body_lines = []
+        for p in pairs:
+            in_ratio = p['inflow_ratio']
+            out_ratio = p['outflow_ratio']
+            in_m = p['inflow_momentum'] * 100
+            out_m = p['outflow_momentum'] * 100
+            confidence = 'HIGH' if p['score'] >= 75 else 'MEDIUM' if p['score'] >= 60 else 'LOW'
+            body_lines.append(
+                (
+                    f"{p['from_symbol']} ➜ {p['to_symbol']} | "
+                    f"In: {in_ratio:.1f}x, Out: {out_ratio:.1f}x | "
+                    f"Perf: +{in_m:.2f}% vs {out_m:.2f}% | "
+                    f"Score: <b>{p['score']}</b> ({confidence})"
+                )
+            )
+
+        # Add leaders/laggards context
+        inflows = analysis.get('inflows', [])
+        outflows = analysis.get('outflows', [])
+        if inflows:
+            top_in = ", ".join([f"{x['symbol']}({x['quote_vol_ratio']:.1f}x)" for x in inflows[:3]])
+        else:
+            top_in = "-"
+        if outflows:
+            top_out = ", ".join([f"{x['symbol']}({x['quote_vol_ratio']:.1f}x)" for x in outflows[:3]])
+        else:
+            top_out = "-"
+
+        footer = (
+            "\n\n"
+            f"🏁 Inflows: {top_in}\n"
+            f"💨 Outflows: {top_out}"
+        )
+
+        return header + "\n".join(body_lines) + footer
+
+    def store_rotation(self, analysis: Dict):
+        """Persist detected rotation pairs to the database."""
+        try:
+            pairs = analysis.get('pairs', [])
+            if not pairs:
+                return
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            for p in pairs:
+                cursor.execute(
+                    '''
+                    INSERT INTO capital_rotation (
+                        timeframe, from_symbol, to_symbol, inflow_ratio, outflow_ratio,
+                        inflow_momentum, outflow_momentum, score, note
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ''', (
+                        analysis.get('timeframe', '1h'),
+                        p['from_symbol'],
+                        p['to_symbol'],
+                        p['inflow_ratio'],
+                        p['outflow_ratio'],
+                        p['inflow_momentum'],
+                        p['outflow_momentum'],
+                        p['score'],
+                        ''
+                    )
+                )
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            logger.error(f"Failed to store rotation analysis: {e}")
+
 class OrderBookSetupAnalyzer:
     """Professional order book setup detection for trading opportunities"""
     
@@ -2094,6 +2309,7 @@ class EnhancedTelegramBot:
         self.orderbook_analyzer = OrderBookAnalyzer()
         self.dominance_analyzer = USDTDominanceAnalyzer()
         self.volume_analyzer = VolumeSurgeAnalyzer()
+        self.rotation_analyzer = CapitalRotationAnalyzer()
         self.setup_analyzer = OrderBookSetupAnalyzer()
         self.ema_analyzer = EMAAnalyzer()
         self.rsi_analyzer = RSIAnalyzer()
@@ -2101,6 +2317,7 @@ class EnhancedTelegramBot:
         self.last_vwap_price = None
         self.dominance_running = False
         self.volume_surge_running = False
+        self.rotation_running = False
         self.ema_running = False
         self.rsi_running = False
         self.setup_running = False
@@ -2531,6 +2748,26 @@ class EnhancedTelegramBot:
                 
             await asyncio.sleep(1800)  # 30 minutes
 
+    async def rotation_monitor(self):
+        """Monitor capital rotation across the watchlist every 30 minutes."""
+        while self.rotation_running:
+            try:
+                logger.info("Analyzing capital rotation across watchlist...")
+                analysis = self.rotation_analyzer.analyze_rotation(self.symbols, self.get_ohlcv, timeframe='1h')
+                if analysis:
+                    alert = self.rotation_analyzer.generate_rotation_alert(analysis, min_score=60)
+                    if alert:
+                        await self.send_alert(alert)
+                        self.rotation_analyzer.store_rotation(analysis)
+                        logger.info("Capital rotation alert sent")
+                    else:
+                        logger.info("No strong capital rotation detected")
+                else:
+                    logger.warning("Capital rotation analysis failed or insufficient data")
+            except Exception as e:
+                logger.error(f"Capital rotation monitoring error: {e}")
+            await asyncio.sleep(1800)  # 30 minutes
+
     def get_current_market_sentiment(self) -> Optional[str]:
         """Get current market sentiment from USDT dominance"""
         try:
@@ -2719,6 +2956,7 @@ class EnhancedTelegramBot:
         self.orderbook_running = True
         self.dominance_running = True
         self.volume_surge_running = True
+        self.rotation_running = True
         self.ema_running = True
         self.rsi_running = True
         self.setup_running = True
@@ -2741,6 +2979,10 @@ class EnhancedTelegramBot:
         volume_task = asyncio.create_task(self.volume_surge_monitor())
         logger.info("Volume surge monitoring started")
         
+        # Start capital rotation monitoring task
+        rotation_task = asyncio.create_task(self.rotation_monitor())
+        logger.info("Capital rotation monitoring started")
+        
         # Start setup monitoring task
         setup_task = asyncio.create_task(self.setup_monitor())
         logger.info("Setup monitoring started")
@@ -2761,12 +3003,22 @@ class EnhancedTelegramBot:
             "🎯 USDT.D sentiment: ACTIVE\n"
             "📈 Volume surge alerts: ACTIVE\n"
             "⚡ Setup detection: ACTIVE\n"
+            "🔄 Capital rotation: ACTIVE\n"
             "🎯 EMA alerts: ACTIVE\n"
             "📊 RSI alerts: ACTIVE\n\n"
             f"Monitoring {len(self.symbols)} symbols"
         )
         
-        return breakout_task, orderbook_task, dominance_task, volume_task, setup_task, ema_task, rsi_task
+        return (
+            breakout_task,
+            orderbook_task,
+            dominance_task,
+            volume_task,
+            rotation_task,
+            setup_task,
+            ema_task,
+            rsi_task,
+        )
 
     async def breakout_monitor(self):
         """Monitor breakouts at candle close"""
@@ -2797,6 +3049,7 @@ class EnhancedTelegramBot:
         self.orderbook_running = False
         self.dominance_running = False
         self.volume_surge_running = False
+        self.rotation_running = False
         self.ema_running = False
         self.rsi_running = False
 
@@ -2812,6 +3065,7 @@ async def start_command(update, context: ContextTypes.DEFAULT_TYPE):
         "📊 Order book analysis every 30min\n"
         "🎯 USDT.D macro sentiment monitoring\n"
         "📈 Volume surge early warning alerts\n"
+        "🔄 Capital rotation detection\n"
         "\nCommands:\n"
         "/start - Show this message\n"
         "/status - Check bot status\n"
@@ -2823,6 +3077,7 @@ async def start_command(update, context: ContextTypes.DEFAULT_TYPE):
         "/entry all - Show best entry opportunities across watchlist\n"
         "/dominance - Check USDT dominance sentiment\n"
         "/volume - Scan for current volume surges\n"
+        "/rotation - Analyze capital rotation across watchlist\n"
         "/setups - Scan for trading setups\n"
         "/stop - Stop monitoring",
         parse_mode='HTML'
@@ -2836,6 +3091,7 @@ async def status_command(update, context: ContextTypes.DEFAULT_TYPE):
         orderbook_status = "🟢 Running" if bot_instance.orderbook_running else "🔴 Stopped"
         dominance_status = "🟢 Running" if bot_instance.dominance_running else "🔴 Stopped"
         volume_status = "🟢 Running" if bot_instance.volume_surge_running else "🔴 Stopped"
+        rotation_status = "🟢 Running" if bot_instance.rotation_running else "🔴 Stopped"
         ema_status = "🟢 Running" if bot_instance.ema_running else "🔴 Stopped"
         rsi_status = "🟢 Running" if bot_instance.rsi_running else "🔴 Stopped"
         await update.message.reply_text(
@@ -2844,6 +3100,7 @@ async def status_command(update, context: ContextTypes.DEFAULT_TYPE):
             f"📊 Order Book: {orderbook_status}\n"
             f"🎯 USDT.D Sentiment: {dominance_status}\n"
             f"📈 Volume Surges: {volume_status}\n"
+            f"🔄 Capital Rotation: {rotation_status}\n"
             f"🎯 EMA Alerts: {ema_status}\n"
             f"📊 RSI Alerts: {rsi_status}",
             parse_mode='HTML'
@@ -2860,7 +3117,8 @@ async def symbols_command(update, context: ContextTypes.DEFAULT_TYPE):
         f"<b>Additional Monitoring:</b>\n"
         f"• Order Book: BTC/USDT (every 30min)\n"
         f"• USDT.D Sentiment: Global (every 1h)\n"
-        f"• Volume Surges: All symbols (every 30min)",
+        f"• Volume Surges: All symbols (every 30min)\n"
+        f"• Capital Rotation: All symbols (every 30min)",
         parse_mode='HTML'
     )
 
@@ -3119,6 +3377,47 @@ async def setups_command(update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"❌ Error scanning setups: {str(e)[:100]}", parse_mode='HTML')
 
+async def rotation_command(update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /rotation command - analyze capital rotation across watchlist"""
+    bot_instance = context.bot_data.get('bot_instance')
+    if not bot_instance:
+        await update.message.reply_text("❌ Bot not initialized", parse_mode='HTML')
+        return
+    
+    # Optional timeframe arg (default 1h)
+    tf = '1h'
+    if context.args:
+        candidate = context.args[0].lower()
+        if candidate in ['15m', '30m', '1h', '4h']:
+            tf = candidate
+    
+    await update.message.reply_text(f"🔄 Scanning for capital rotation ({tf})...", parse_mode='HTML')
+    
+    try:
+        analysis = bot_instance.rotation_analyzer.analyze_rotation(bot_instance.symbols, bot_instance.get_ohlcv, timeframe=tf)
+        if not analysis:
+            await update.message.reply_text("❌ Unable to compute rotation (insufficient data)", parse_mode='HTML')
+            return
+        
+        # Build alert; for manual command show even lower-score pairs
+        alert = bot_instance.rotation_analyzer.generate_rotation_alert(analysis, min_score=0)
+        if not alert:
+            # Fallback summary
+            inflows = analysis.get('inflows', [])
+            outflows = analysis.get('outflows', [])
+            lines = [f"🔄 <b>Capital Rotation Summary</b> ({tf})\n"]
+            if inflows:
+                top_in = ", ".join([f"{x['symbol']}({x['quote_vol_ratio']:.1f}x)" for x in inflows[:3]])
+                lines.append(f"🏁 Inflows: {top_in}")
+            if outflows:
+                top_out = ", ".join([f"{x['symbol']}({x['quote_vol_ratio']:.1f}x)" for x in outflows[:3]])
+                lines.append(f"💨 Outflows: {top_out}")
+            alert = "\n".join(lines)
+        
+        await update.message.reply_text(alert, parse_mode='HTML')
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error analyzing rotation: {str(e)[:100]}", parse_mode='HTML')
+
 async def entry_command(update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /entry command - show deepest walls for entry analysis"""
     bot_instance = context.bot_data.get('bot_instance')
@@ -3231,6 +3530,7 @@ def main():
     application.add_handler(CommandHandler("analyze", analyze_command))
     application.add_handler(CommandHandler("dominance", dominance_command))
     application.add_handler(CommandHandler("volume", volume_command))
+    application.add_handler(CommandHandler("rotation", rotation_command))
     application.add_handler(CommandHandler("setups", setups_command))
     application.add_handler(CommandHandler("entry", entry_command))
     application.add_handler(CommandHandler("stop", stop_command))
