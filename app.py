@@ -1605,10 +1605,8 @@ class OrderBookAnalyzer:
 
     def generate_report(self, analysis: Dict) -> str:
         """Generate order book report"""
-        # If sentiment is neutral, just return "neutral"
+        # Always generate a full report regardless of sentiment
         sentiment = analysis.get('market_sentiment', 'NEUTRAL')
-        if sentiment == 'NEUTRAL':
-            return "neutral"
         
         report = f"📊 <b>Order Book Analysis</b>\n"
         # Use more decimals for low-price coins
