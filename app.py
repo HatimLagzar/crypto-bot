@@ -24,7 +24,9 @@ class USDTDominanceAnalyzer:
     """USDT Dominance macro sentiment analysis"""
     
     def __init__(self):
-        self.db_path = "usdt_dominance.db"
+        # Use persistent storage path if available, fallback to current directory
+        data_dir = os.environ.get('DATA_DIR', '.')
+        self.db_path = os.path.join(data_dir, "usdt_dominance.db")
         self.init_database()
         
     def init_database(self):
@@ -126,31 +128,14 @@ class USDTDominanceAnalyzer:
             # Get historical data from database
             historical_df = self.get_historical_dominance(hours=168)  # 7 days
             
-            if historical_df is None or len(historical_df) < 10:
-                logger.warning("Insufficient historical data, building minimal dataset")
+            if historical_df is None or len(historical_df) < 3:
+                logger.warning("Insufficient historical data for analysis")
                 # Create minimal dataset with just current value
                 now = datetime.now()
-                timestamps = pd.date_range(end=now, periods=24, freq='1h')
-                
-                # Use current dominance as baseline for recent hours
-                historical_data = []
-                for ts in timestamps[:-1]:
-                    # Add small realistic variation for recent hours
-                    variation = np.random.normal(0, 0.1)  # Small normal distribution
-                    dominance = max(0.5, min(15.0, current_dominance + variation))
-                    historical_data.append({
-                        'timestamp': ts,
-                        'dominance': dominance
-                    })
-                
-                # Add current value
-                historical_data.append({
-                    'timestamp': now,
-                    'dominance': current_dominance
-                })
-                
-                df = pd.DataFrame(historical_data)
-                df.set_index('timestamp', inplace=True)
+                df = pd.DataFrame(
+                    {'dominance': [current_dominance]},
+                    index=[now]
+                )
                 return df
             
             # Ensure current value is the latest
@@ -235,23 +220,51 @@ class USDTDominanceAnalyzer:
         # Get last stored analysis for better percentage calculation
         last_analysis = self.get_last_stored_analysis()
         
-        # Calculate percentage change using multiple timeframes
+        # Calculate percentage change using time-based lookback (not index-based)
         pct_changes = {}
-        
-        # 1-hour change (if we have previous data point)
-        if len(df) >= 2:
-            previous_1h = df.iloc[-2]
-            pct_changes['1h'] = ((current['dominance'] - previous_1h['dominance']) / previous_1h['dominance']) * 100
-        
-        # 4-hour change
-        if len(df) >= 4:
-            previous_4h = df.iloc[-4]
-            pct_changes['4h'] = ((current['dominance'] - previous_4h['dominance']) / previous_4h['dominance']) * 100
-        
-        # 24-hour change
-        if len(df) >= 24:
-            previous_24h = df.iloc[-24]
-            pct_changes['24h'] = ((current['dominance'] - previous_24h['dominance']) / previous_24h['dominance']) * 100
+        current_time = current.name if hasattr(current, 'name') else df.index[-1]
+
+        # 1-hour change - find closest data point to 1 hour ago
+        one_hour_ago = current_time - pd.Timedelta(hours=1)
+        hour_mask = df.index <= one_hour_ago
+        if hour_mask.any():
+            previous_1h = df[hour_mask].iloc[-1]  # Most recent point before 1h ago
+            time_diff = (current_time - previous_1h.name).total_seconds() / 3600  # hours
+            if time_diff <= 2:  # Within 2 hours is acceptable for 1h calculation
+                pct_changes['1h'] = ((current['dominance'] - previous_1h['dominance']) / previous_1h['dominance']) * 100
+                logger.debug(f"1h change calculated using data from {time_diff:.1f}h ago")
+            else:
+                logger.debug(f"1h change skipped - nearest data is {time_diff:.1f}h old")
+        else:
+            logger.debug("1h change skipped - no historical data older than 1h")
+
+        # 4-hour change - find closest data point to 4 hours ago
+        four_hours_ago = current_time - pd.Timedelta(hours=4)
+        four_hour_mask = df.index <= four_hours_ago
+        if four_hour_mask.any():
+            previous_4h = df[four_hour_mask].iloc[-1]  # Most recent point before 4h ago
+            time_diff = (current_time - previous_4h.name).total_seconds() / 3600  # hours
+            if time_diff <= 6:  # Within 6 hours is acceptable for 4h calculation
+                pct_changes['4h'] = ((current['dominance'] - previous_4h['dominance']) / previous_4h['dominance']) * 100
+                logger.debug(f"4h change calculated using data from {time_diff:.1f}h ago")
+            else:
+                logger.debug(f"4h change skipped - nearest data is {time_diff:.1f}h old")
+        else:
+            logger.debug("4h change skipped - no historical data older than 4h")
+
+        # 24-hour change - find closest data point to 24 hours ago
+        twenty_four_hours_ago = current_time - pd.Timedelta(hours=24)
+        day_mask = df.index <= twenty_four_hours_ago
+        if day_mask.any():
+            previous_24h = df[day_mask].iloc[-1]  # Most recent point before 24h ago
+            time_diff = (current_time - previous_24h.name).total_seconds() / 3600  # hours
+            if time_diff <= 30:  # Within 30 hours is acceptable for 24h calculation
+                pct_changes['24h'] = ((current['dominance'] - previous_24h['dominance']) / previous_24h['dominance']) * 100
+                logger.debug(f"24h change calculated using data from {time_diff:.1f}h ago")
+            else:
+                logger.debug(f"24h change skipped - nearest data is {time_diff:.1f}h old")
+        else:
+            logger.debug("24h change skipped - no historical data older than 24h")
         
         # Use the most appropriate timeframe for percentage change
         if last_analysis and last_analysis['dominance']:
@@ -427,7 +440,8 @@ class VolumeSurgeAnalyzer:
     """Volume surge detection for early warning alerts"""
     
     def __init__(self):
-        self.db_path = "volume_surges.db"
+        data_dir = os.environ.get('DATA_DIR', '.')
+        self.db_path = os.path.join(data_dir, "volume_surges.db")
         self.init_database()
         
         # Volume surge thresholds
@@ -626,7 +640,8 @@ class CapitalRotationAnalyzer:
     """Detect capital rotation (volume flow) between assets."""
 
     def __init__(self):
-        self.db_path = "rotation_data.db"
+        data_dir = os.environ.get('DATA_DIR', '.')
+        self.db_path = os.path.join(data_dir, "rotation_data.db")
         self.init_database()
 
     def init_database(self):
@@ -841,7 +856,8 @@ class OrderBookSetupAnalyzer:
     """Professional order book setup detection for trading opportunities"""
     
     def __init__(self):
-        self.db_path = "orderbook_setups.db"
+        data_dir = os.environ.get('DATA_DIR', '.')
+        self.db_path = os.path.join(data_dir, "orderbook_setups.db")
         self.init_database()
         
     def init_database(self):
@@ -1170,7 +1186,8 @@ class OrderBookAnalyzer:
     """Order book analysis component"""
 
     def __init__(self):
-        self.db_path = "orderbook_data.db"
+        data_dir = os.environ.get('DATA_DIR', '.')
+        self.db_path = os.path.join(data_dir, "orderbook_data.db")
         self.init_database()
 
         # Analysis thresholds
@@ -1932,9 +1949,10 @@ class OrderBookAnalyzer:
 
 class EMAAnalyzer:
     """EMA touch/cross detection and alerting"""
-    
+
     def __init__(self):
-        self.db_path = "orderbook_data.db"
+        data_dir = os.environ.get('DATA_DIR', '.')
+        self.db_path = os.path.join(data_dir, "orderbook_data.db")
         self.init_database()
         self.ema_periods = [12, 20, 50, 100, 200]
         self.last_ema_states = {}
@@ -2120,9 +2138,10 @@ class EMAAnalyzer:
 
 class RSIAnalyzer:
     """RSI overbought/oversold detection and alerting"""
-    
+
     def __init__(self):
-        self.db_path = "orderbook_data.db"
+        data_dir = os.environ.get('DATA_DIR', '.')
+        self.db_path = os.path.join(data_dir, "orderbook_data.db")
         self.init_database()
         self.overbought_threshold = 70
         self.oversold_threshold = 30
