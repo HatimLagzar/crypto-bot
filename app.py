@@ -1418,34 +1418,113 @@ class OrderBookAnalyzer:
         score = base_score + size_factor + pressure_bonus - distance_penalty
         return max(0, min(score, 1.0))  # Clamp between 0 and 1
 
+    def calculate_depth_profile(self, bids: List[List[float]], asks: List[List[float]], mid_price: float) -> List[Dict]:
+        """Build depth profile across multiple percentage bands around mid price"""
+        depth_windows = [0.1, 0.25, 0.5, 0.75, 1.0, 5.0]
+        profile = []
+        for pct in depth_windows:
+            bid_cutoff = mid_price * (1 - pct / 100)
+            ask_cutoff = mid_price * (1 + pct / 100)
+            bid_depth = sum(qty for price, qty in bids if price >= bid_cutoff)
+            ask_depth = sum(qty for price, qty in asks if price <= ask_cutoff)
+            total_depth = bid_depth + ask_depth
+            imbalance = (bid_depth - ask_depth) / total_depth if total_depth else 0.0
+            profile.append({
+                'window_pct': pct,
+                'bid_depth': bid_depth,
+                'ask_depth': ask_depth,
+                'total_depth': total_depth,
+                'bid_depth_usd': bid_depth * mid_price,
+                'ask_depth_usd': ask_depth * mid_price,
+                'total_depth_usd': total_depth * mid_price,
+                'imbalance': imbalance
+            })
+        return profile
+
+    def _find_depth_entry(self, depth_profile: List[Dict], target_pct: float) -> Optional[Dict]:
+        """Locate a depth profile entry for a given percentage band"""
+        for entry in depth_profile:
+            if abs(entry['window_pct'] - target_pct) < 1e-9:
+                return entry
+        return None
+
+    def _format_pct_key(self, pct: float) -> str:
+        """Convert a percentage value to a safe dict key suffix"""
+        pct_str = f"{pct:.2f}".rstrip('0').rstrip('.')
+        return f"{pct_str.replace('.', '_')}pct"
+
     def calculate_market_pressure(self, bids: List[List[float]], asks: List[List[float]], mid_price: float) -> Dict:
         """Calculate various market pressure metrics"""
         pressure = {}
-        # Immediate, short-term, medium-term as before...
-        immediate_bid_vol = sum(qty for price, qty in bids if price >= mid_price * 0.999)
-        immediate_ask_vol = sum(qty for price, qty in asks if price <= mid_price * 1.001)
-        total_immediate = immediate_bid_vol + immediate_ask_vol
-        if total_immediate > 0:
-            pressure['immediate_imbalance'] = (immediate_bid_vol - immediate_ask_vol) / total_immediate
+        depth_profile = self.calculate_depth_profile(bids, asks, mid_price)
+        pressure['depth_profile'] = depth_profile
 
-        short_bid_vol = sum(qty for price, qty in bids if price >= mid_price * 0.99)
-        short_ask_vol = sum(qty for price, qty in asks if price <= mid_price * 1.01)
-        total_short = short_bid_vol + short_ask_vol
-        if total_short > 0:
-            pressure['short_term_imbalance'] = (short_bid_vol - short_ask_vol) / total_short
+        for entry in depth_profile:
+            pct_key = self._format_pct_key(entry['window_pct'])
+            pressure[f'bid_depth_{pct_key}'] = entry['bid_depth']
+            pressure[f'ask_depth_{pct_key}'] = entry['ask_depth']
+            pressure[f'depth_imbalance_{pct_key}'] = entry['imbalance']
 
-        medium_bid_vol = sum(qty for price, qty in bids if price >= mid_price * 0.95)
-        medium_ask_vol = sum(qty for price, qty in asks if price <= mid_price * 1.05)
-        total_medium = medium_bid_vol + medium_ask_vol
-        if total_medium > 0:
-            pressure['medium_term_imbalance'] = (medium_bid_vol - medium_ask_vol) / total_medium
+        immediate_entry = self._find_depth_entry(depth_profile, 0.1)
+        if immediate_entry and immediate_entry['total_depth'] > 0:
+            pressure['immediate_imbalance'] = immediate_entry['imbalance']
 
-        pressure['bid_depth_1pct'] = short_bid_vol
-        pressure['ask_depth_1pct'] = short_ask_vol
-        pressure['bid_depth_5pct'] = medium_bid_vol
-        pressure['ask_depth_5pct'] = medium_ask_vol
+        short_entry = self._find_depth_entry(depth_profile, 1.0)
+        if short_entry and short_entry['total_depth'] > 0:
+            pressure['short_term_imbalance'] = short_entry['imbalance']
+
+        medium_entry = self._find_depth_entry(depth_profile, 5.0)
+        if medium_entry and medium_entry['total_depth'] > 0:
+            pressure['medium_term_imbalance'] = medium_entry['imbalance']
 
         return pressure
+
+    def _depth_bias_headline(self, avg_imbalance: float) -> str:
+        """Translate average imbalance into a plain-language headline"""
+        if avg_imbalance > 0.2:
+            return "Buyers dominate the near book"
+        if avg_imbalance > 0.08:
+            return "Buyers hold a slight edge nearby"
+        if avg_imbalance < -0.2:
+            return "Sellers dominate the near book"
+        if avg_imbalance < -0.08:
+            return "Sellers hold a slight edge nearby"
+        return "Depth looks balanced near price"
+
+    def generate_depth_summary(self, depth_profile: List[Dict], mid_price: float) -> Optional[str]:
+        """Create a short narrative summary of near-price depth"""
+        key_windows = [0.1, 0.25, 0.5, 0.75]
+        entries = []
+        for pct in key_windows:
+            entry = self._find_depth_entry(depth_profile, pct)
+            if entry and entry['total_depth'] > 0:
+                entries.append(entry)
+
+        if not entries:
+            return None
+
+        avg_imbalance = sum(e['imbalance'] for e in entries) / len(entries)
+        headline = self._depth_bias_headline(avg_imbalance)
+
+        near_entry = self._find_depth_entry(depth_profile, 0.75)
+        liquidity_note = ""
+        if near_entry and near_entry['total_depth_usd'] > 0:
+            liquidity_note = f" (~${near_entry['total_depth_usd']:,.0f} within 0.75%)"
+
+        snapshots = []
+        for entry in entries:
+            imbalance_pct = entry['imbalance'] * 100
+            if imbalance_pct > 5:
+                direction = "buy"
+            elif imbalance_pct < -5:
+                direction = "sell"
+            else:
+                direction = "flat"
+            pct_label = f"{entry['window_pct']:.2f}".rstrip('0').rstrip('.')
+            snapshots.append(f"{pct_label}% {direction} {imbalance_pct:+.0f}%")
+
+        snapshot_text = '; '.join(snapshots)
+        return f"{headline}{liquidity_note}. {snapshot_text}."
 
     def detect_significant_levels(self, bids: List[List[float]], asks: List[List[float]], mid_price: float) -> Dict:
         """Detect significant support and resistance levels by aggregating orders in price zones for trading"""
@@ -1827,8 +1906,14 @@ class OrderBookAnalyzer:
             'spread': order_book_data['spread'],
             'spread_bps': order_book_data['spread_bps']
         }
-        analysis.update(self.calculate_market_pressure(bids, asks, mid_price))
+        pressure_metrics = self.calculate_market_pressure(bids, asks, mid_price)
+        analysis.update(pressure_metrics)
         analysis.update(self.detect_significant_levels(bids, asks, mid_price))
+        depth_profile = pressure_metrics.get('depth_profile')
+        if depth_profile:
+            depth_summary = self.generate_depth_summary(depth_profile, mid_price)
+            if depth_summary:
+                analysis['depth_summary'] = depth_summary
         # ... weighted prices, skew, sentiment, liquidity score ...
         analysis['market_sentiment'] = self.classify_market_sentiment(analysis)
         analysis['liquidity_score'] = self.calculate_liquidity_score(analysis, symbol)
@@ -1855,6 +1940,29 @@ class OrderBookAnalyzer:
                 report += f"⚡ Market Pressure: <b>{direction}</b> ({imbalance:.1%})\n"
             else:
                 report += f"⚖️ Market Pressure: BALANCED ({imbalance:.1%})\n"
+
+        depth_profile = analysis.get('depth_profile', [])
+        if depth_profile:
+            report += "\n📉 Depth Profile (distance from mid):\n"
+            for pct in [0.1, 0.25, 0.5, 0.75]:
+                entry = self._find_depth_entry(depth_profile, pct)
+                if not entry or entry['total_depth'] == 0:
+                    continue
+                pct_label = f"{pct:.2f}".rstrip('0').rstrip('.')
+                bias_pct = entry['imbalance'] * 100
+                if bias_pct > 5:
+                    bias_label = "Buy"
+                elif bias_pct < -5:
+                    bias_label = "Sell"
+                else:
+                    bias_label = "Flat"
+                report += (
+                    f"  {pct_label}%: {bias_label} {bias_pct:+.0f}% | "
+                    f"Bids ${entry['bid_depth_usd']:,.0f} vs Asks ${entry['ask_depth_usd']:,.0f}\n"
+                )
+            depth_summary = analysis.get('depth_summary')
+            if depth_summary:
+                report += f"🧭 Depth Read: {depth_summary}\n"
         
         # Significant levels with prices
         significant_bids = analysis.get('significant_bids', [])
