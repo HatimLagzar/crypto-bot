@@ -1978,20 +1978,24 @@ class OrderBookAnalyzer:
                 pct_label = f"{pct:.2f}".rstrip('0').rstrip('.')
                 bias_pct = entry['imbalance'] * 100
                 if bias_pct > 5:
-                    bias_label = "Buy"
+                    bias_label = "BUY"
+                    bias_emoji = "🟢"
                 elif bias_pct < -5:
-                    bias_label = "Sell"
+                    bias_label = "SELL"
+                    bias_emoji = "🔴"
                 else:
-                    bias_label = "Flat"
-                bias_display = bias_label.upper() if bias_label != "Flat" else bias_label
+                    bias_label = "FLAT"
+                    bias_emoji = "⚪️"
                 total_text = self._format_usd_compact(entry['total_depth_usd'])
                 bid_text = self._format_usd_compact(entry['bid_depth_usd'])
                 ask_text = self._format_usd_compact(entry['ask_depth_usd'])
                 net_text = self._format_usd_compact(entry['bid_depth_usd'] - entry['ask_depth_usd'], show_sign=True)
                 report += (
-                    f"  • {pct_label}% band -> {bias_display} {bias_pct:+.0f}% | "
-                    f"Depth {total_text} USDT (B {bid_text} / A {ask_text}) | "
-                    f"Net {net_text}\n"
+                    f"  {pct_label}% band\n"
+                    f"    {bias_emoji} Bias: {bias_label} ({bias_pct:+.0f}%)\n"
+                    f"    💧 Depth: {total_text} USDT\n"
+                    f"    🟢 Bids: {bid_text} | 🔴 Asks: {ask_text}\n"
+                    f"    ⚖️ Net: {net_text}\n\n"
                 )
             depth_summary = analysis.get('depth_summary')
             if depth_summary:
