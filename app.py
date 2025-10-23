@@ -1453,6 +1453,33 @@ class OrderBookAnalyzer:
         pct_str = f"{pct:.2f}".rstrip('0').rstrip('.')
         return f"{pct_str.replace('.', '_')}pct"
 
+    def _format_usd_compact(self, value: float, show_sign: bool = False) -> str:
+        """Format large USD values into compact human-readable form"""
+        abs_value = abs(value)
+        suffix = ''
+        scaled = value
+        if abs_value >= 1_000_000_000:
+            scaled = value / 1_000_000_000
+            suffix = 'B'
+        elif abs_value >= 1_000_000:
+            scaled = value / 1_000_000
+            suffix = 'M'
+        elif abs_value >= 1_000:
+            scaled = value / 1_000
+            suffix = 'K'
+        else:
+            formatted = f"{value:,.0f}"
+            if show_sign and value > 0:
+                return f"+{formatted}"
+            return formatted
+
+        formatted = f"{scaled:.1f}"
+        if formatted.endswith('.0'):
+            formatted = formatted[:-2]
+        if show_sign and value > 0:
+            formatted = f"+{formatted}"
+        return f"{formatted}{suffix}"
+
     def calculate_market_pressure(self, bids: List[List[float]], asks: List[List[float]], mid_price: float) -> Dict:
         """Calculate various market pressure metrics"""
         pressure = {}
@@ -1956,9 +1983,15 @@ class OrderBookAnalyzer:
                     bias_label = "Sell"
                 else:
                     bias_label = "Flat"
+                bias_display = bias_label.upper() if bias_label != "Flat" else bias_label
+                total_text = self._format_usd_compact(entry['total_depth_usd'])
+                bid_text = self._format_usd_compact(entry['bid_depth_usd'])
+                ask_text = self._format_usd_compact(entry['ask_depth_usd'])
+                net_text = self._format_usd_compact(entry['bid_depth_usd'] - entry['ask_depth_usd'], show_sign=True)
                 report += (
-                    f"  {pct_label}%: {bias_label} {bias_pct:+.0f}% | "
-                    f"Bids ${entry['bid_depth_usd']:,.0f} vs Asks ${entry['ask_depth_usd']:,.0f}\n"
+                    f"  • {pct_label}% band -> {bias_display} {bias_pct:+.0f}% | "
+                    f"Depth {total_text} USDT (B {bid_text} / A {ask_text}) | "
+                    f"Net {net_text}\n"
                 )
             depth_summary = analysis.get('depth_summary')
             if depth_summary:
@@ -1967,33 +2000,16 @@ class OrderBookAnalyzer:
         # Significant levels with prices
         significant_bids = analysis.get('significant_bids', [])
         significant_asks = analysis.get('significant_asks', [])
-        
-        # Show major levels first, then minor levels
-        major_bids = analysis.get('major_bids', [])
+        # Show minor levels only
         minor_bids = analysis.get('minor_bids', [])
-        major_asks = analysis.get('major_asks', [])
         minor_asks = analysis.get('minor_asks', [])
         
-        if major_bids:
-            report += f"\n🟢 <b>MAJOR Support Levels:</b>\n"
-            for bid in major_bids[:3]:  # Show top 3 major
-                decimals = 6 if bid['price'] < 1 else 4 if bid['price'] < 100 else 2
-                usdt_value = bid['usdt_value']
-                report += f"  ${bid['price']:.{decimals}f} ({bid['distance_pct']:.2f}% below) - ${usdt_value:,.0f} USDT [{bid['order_count']} orders]\n"
-                
         if minor_bids:
             report += f"\n🔵 <b>Minor Support Levels:</b>\n"
             for bid in minor_bids[:2]:  # Show top 2 minor
                 decimals = 6 if bid['price'] < 1 else 4 if bid['price'] < 100 else 2
                 usdt_value = bid['usdt_value']
                 report += f"  ${bid['price']:.{decimals}f} ({bid['distance_pct']:.2f}% below) - ${usdt_value:,.0f} USDT [{bid['order_count']} orders]\n"
-                
-        if major_asks:
-            report += f"\n🔴 <b>MAJOR Resistance Levels:</b>\n"
-            for ask in major_asks[:3]:  # Show top 3 major
-                decimals = 6 if ask['price'] < 1 else 4 if ask['price'] < 100 else 2
-                usdt_value = ask['usdt_value']
-                report += f"  ${ask['price']:.{decimals}f} ({ask['distance_pct']:.2f}% above) - ${usdt_value:,.0f} USDT [{ask['order_count']} orders]\n"
                 
         if minor_asks:
             report += f"\n🟠 <b>Minor Resistance Levels:</b>\n"
@@ -2002,19 +2018,6 @@ class OrderBookAnalyzer:
                 usdt_value = ask['usdt_value']
                 report += f"  ${ask['price']:.{decimals}f} ({ask['distance_pct']:.2f}% above) - ${usdt_value:,.0f} USDT [{ask['order_count']} orders]\n"
         
-        # Wall counts and thresholds
-        thresholds = analysis.get('thresholds', {})
-        major_threshold = thresholds.get('major', 0)
-        minor_threshold = thresholds.get('minor', 0)
-        zone_pct = thresholds.get('zone_pct', 0)
-        
-        if analysis.get('large_bid_walls', 0) > 0 or analysis.get('large_ask_walls', 0) > 0:
-            report += f"\n📊 Major Walls: {analysis.get('large_bid_walls', 0)} bids, {analysis.get('large_ask_walls', 0)} asks\n"
-            report += f"📈 Total Walls: {analysis.get('total_bid_walls', 0)} bids, {analysis.get('total_ask_walls', 0)} asks\n"
-            
-        if major_threshold > 0:
-            report += f"\n⚙️ Thresholds: Major ${major_threshold/1000:.0f}K+ | Minor ${minor_threshold/1000:.0f}K+ | Zone {zone_pct:.2f}%\n"
-            
         # Liquidity and sentiment
         report += f"\n💧 Liquidity Score: {analysis.get('liquidity_score', 0):.0f}/100\n"
         report += f"🎯 Sentiment: <b>{sentiment}</b>"
