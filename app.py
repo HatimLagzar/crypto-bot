@@ -2424,16 +2424,155 @@ class RSIAnalyzer:
         return alert_msg
 
 
+class CoinbasePremiumAnalyzer:
+    """Coinbase Premium Index – tracks the BTC price gap between Coinbase and Binance.
+
+    A positive premium signals strong US institutional buying; a negative
+    premium suggests US-side selling pressure.
+    """
+
+    def __init__(self):
+        data_dir = os.environ.get('DATA_DIR', '.')
+        self.db_path = os.path.join(data_dir, "coinbase_premium.db")
+        self.init_database()
+        self.coinbase = ccxt.coinbase()
+        self.binance = ccxt.binance()
+
+    def init_database(self):
+        """Create table for premium history"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS coinbase_premium (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                coinbase_price REAL,
+                binance_price REAL,
+                premium_usd REAL,
+                premium_pct REAL,
+                state TEXT
+            )
+        ''')
+        conn.commit()
+        conn.close()
+
+    def fetch_premium(self) -> Optional[Dict]:
+        """Fetch current BTC prices from Coinbase and Binance and compute the premium."""
+        try:
+            cb_ticker = self.coinbase.fetch_ticker('BTC/USD')
+            bn_ticker = self.binance.fetch_ticker('BTC/USDT')
+
+            cb_price = cb_ticker['last']
+            bn_price = bn_ticker['last']
+
+            if cb_price is None or bn_price is None:
+                return None
+
+            premium_usd = cb_price - bn_price
+            premium_pct = (premium_usd / bn_price) * 100
+
+            # Classify state
+            if premium_pct >= 0.15:
+                state = "STRONG_POSITIVE"
+            elif premium_pct >= 0.05:
+                state = "POSITIVE"
+            elif premium_pct > -0.05:
+                state = "NEUTRAL"
+            elif premium_pct > -0.15:
+                state = "NEGATIVE"
+            else:
+                state = "STRONG_NEGATIVE"
+
+            return {
+                'coinbase_price': cb_price,
+                'binance_price': bn_price,
+                'premium_usd': premium_usd,
+                'premium_pct': premium_pct,
+                'state': state,
+            }
+        except Exception as e:
+            logger.error(f"Error fetching coinbase premium: {e}")
+            return None
+
+    def get_last_state(self) -> Optional[str]:
+        """Return the most recent stored state, or None if no history."""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT state FROM coinbase_premium
+                ORDER BY id DESC LIMIT 1
+            ''')
+            row = cursor.fetchone()
+            conn.close()
+            return row[0] if row else None
+        except Exception as e:
+            logger.error(f"Error reading last premium state: {e}")
+            return None
+
+    def store_premium(self, data: Dict):
+        """Persist a premium reading."""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute('''
+                INSERT INTO coinbase_premium
+                    (coinbase_price, binance_price, premium_usd, premium_pct, state)
+                VALUES (?, ?, ?, ?, ?)
+            ''', (
+                data['coinbase_price'],
+                data['binance_price'],
+                data['premium_usd'],
+                data['premium_pct'],
+                data['state'],
+            ))
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            logger.error(f"Error storing premium data: {e}")
+
+    def format_premium_alert(self, data: Dict) -> str:
+        """Format a Telegram alert for a premium state change."""
+        state = data['state']
+        premium_pct = data['premium_pct']
+        premium_usd = data['premium_usd']
+        cb_price = data['coinbase_price']
+        bn_price = data['binance_price']
+
+        state_config = {
+            'STRONG_POSITIVE': ('🟢🟢', 'STRONG POSITIVE', 'Heavy US institutional buying pressure'),
+            'POSITIVE':        ('🟢',   'POSITIVE',        'US buyers paying a premium – bullish signal'),
+            'NEUTRAL':         ('⚪',   'NEUTRAL',         'No significant premium – balanced market'),
+            'NEGATIVE':        ('🔴',   'NEGATIVE',        'US sellers dominant – bearish signal'),
+            'STRONG_NEGATIVE': ('🔴🔴', 'STRONG NEGATIVE', 'Heavy US institutional selling pressure'),
+        }
+
+        emoji, label, interpretation = state_config.get(state, ('⚪', state, ''))
+
+        msg = f"{emoji} <b>COINBASE PREMIUM: {label}</b> {emoji}\n\n"
+        msg += f"💰 Coinbase BTC: <b>${cb_price:,.2f}</b>\n"
+        msg += f"💰 Binance BTC:  <b>${bn_price:,.2f}</b>\n"
+        msg += f"📊 Premium: <b>{premium_usd:+,.2f}</b> ({premium_pct:+.3f}%)\n\n"
+        msg += f"💡 <i>{interpretation}</i>"
+
+        return msg
+
+
 class EnhancedTelegramBot:
     def __init__(self, bot_token, chat_id):
         self.bot = Bot(token=bot_token)
         self.chat_id = chat_id
         self.exchange = ccxt.binance()
         self.symbols = [
-            'BTC/USDT', 'ETH/USDT', 'BNB/USDT', 'ADA/USDT', 'SOL/USDT',
-            'HYPE/USDT', 'PENGU/USDT', 'XRP/USDT', 'MKR/USDT', 'AAVE/USDT',
-            'DOGE/USDT', 'APT/USDT', 'XLM/USDT', 'QNT/USDT', 'SUI/USDT',
-            'WIF/USDT', 'TON/USDT', 'KAITO/USDT', 'LINK/USDT', 'BCH/USDT'
+            # Super Watchlist
+            'BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'HYPE/USDT', 'AVAX/USDT',
+            'XRP/USDT', 'SUI/USDT', 'BCH/USDT', 'TAO/USDT', 'LINK/USDT',
+            'TRX/USDT',
+            # Broad Watchlist
+            'ZEC/USDT', 'XMR/USDT', 'QNT/USDT', 'APT/USDT', 'ENA/USDT',
+            'XLM/USDT', 'AAVE/USDT', 'DOGE/USDT', 'HBAR/USDT', 'LTC/USDT',
+            'PENGU/USDT', 'TON/USDT', 'ENS/USDT', 'ADA/USDT', '1000PEPE/USDT',
+            'SEI/USDT', 'WLD/USDT', 'DASH/USDT', 'ASTER/USDT',
         ]
         self.lookback = 20
         self.volume_threshold = 1.5
@@ -2447,6 +2586,7 @@ class EnhancedTelegramBot:
         self.setup_analyzer = OrderBookSetupAnalyzer()
         self.ema_analyzer = EMAAnalyzer()
         self.rsi_analyzer = RSIAnalyzer()
+        self.premium_analyzer = CoinbasePremiumAnalyzer()
         self.last_macd_hist = None
         self.last_vwap_price = None
         self.dominance_running = False
@@ -2455,6 +2595,7 @@ class EnhancedTelegramBot:
         self.ema_running = False
         self.rsi_running = False
         self.setup_running = False
+        self.premium_running = False
         self.last_dominance_sentiment = None
 
         application = Application.builder().token(bot_token).build()
@@ -3080,6 +3221,33 @@ class EnhancedTelegramBot:
                 
             await asyncio.sleep(300)  # Check every 5 minutes
 
+    async def coinbase_premium_monitor(self):
+        """Monitor Coinbase Premium every 15 minutes, alert on state changes."""
+        while self.premium_running:
+            try:
+                logger.info("Checking Coinbase premium...")
+                data = await asyncio.get_event_loop().run_in_executor(
+                    None, self.premium_analyzer.fetch_premium
+                )
+
+                if data:
+                    last_state = self.premium_analyzer.get_last_state()
+                    self.premium_analyzer.store_premium(data)
+
+                    if last_state is None or data['state'] != last_state:
+                        alert = self.premium_analyzer.format_premium_alert(data)
+                        await self.send_alert(alert)
+                        logger.info(f"Coinbase premium alert sent: {data['state']} ({data['premium_pct']:+.3f}%)")
+                    else:
+                        logger.info(f"Coinbase premium unchanged: {data['state']} ({data['premium_pct']:+.3f}%)")
+                else:
+                    logger.warning("Failed to fetch Coinbase premium data")
+
+            except Exception as e:
+                logger.error(f"Coinbase premium monitoring error: {e}")
+
+            await asyncio.sleep(900)  # 15 minutes
+
     async def start_monitoring(self):
         """Start both breakout and order book monitoring"""
         if self.running:
@@ -3094,7 +3262,8 @@ class EnhancedTelegramBot:
         self.ema_running = True
         self.rsi_running = True
         self.setup_running = True
-        
+        self.premium_running = True
+
         logger.info("Starting enhanced monitoring...")
         
         # Start breakout monitoring task
@@ -3128,7 +3297,11 @@ class EnhancedTelegramBot:
         # Start RSI monitoring task
         rsi_task = asyncio.create_task(self.rsi_monitor())
         logger.info("RSI monitoring started")
-        
+
+        # Start Coinbase Premium monitoring task
+        premium_task = asyncio.create_task(self.coinbase_premium_monitor())
+        logger.info("Coinbase premium monitoring started")
+
         # Send startup notification
         await self.send_alert(
             "🤖 <b>Enhanced Crypto Bot Started</b>\n\n"
@@ -3139,10 +3312,11 @@ class EnhancedTelegramBot:
             "⚡ Setup detection: ACTIVE\n"
             "🔄 Capital rotation: ACTIVE\n"
             "🎯 EMA alerts: ACTIVE\n"
-            "📊 RSI alerts: ACTIVE\n\n"
+            "📊 RSI alerts: ACTIVE\n"
+            "💲 Coinbase premium: ACTIVE\n\n"
             f"Monitoring {len(self.symbols)} symbols"
         )
-        
+
         return (
             breakout_task,
             orderbook_task,
@@ -3152,6 +3326,7 @@ class EnhancedTelegramBot:
             setup_task,
             ema_task,
             rsi_task,
+            premium_task,
         )
 
     async def breakout_monitor(self):
@@ -3186,6 +3361,7 @@ class EnhancedTelegramBot:
         self.rotation_running = False
         self.ema_running = False
         self.rsi_running = False
+        self.premium_running = False
 
 
 # Bot command handlers
@@ -3200,6 +3376,7 @@ async def start_command(update, context: ContextTypes.DEFAULT_TYPE):
         "🎯 USDT.D macro sentiment monitoring\n"
         "📈 Volume surge early warning alerts\n"
         "🔄 Capital rotation detection\n"
+        "💲 Coinbase premium tracking\n"
         "\nCommands:\n"
         "/start - Show this message\n"
         "/status - Check bot status\n"
@@ -3213,6 +3390,7 @@ async def start_command(update, context: ContextTypes.DEFAULT_TYPE):
         "/volume - Scan for current volume surges\n"
         "/rotation - Analyze capital rotation across watchlist\n"
         "/setups - Scan for trading setups\n"
+        "/premium - Check Coinbase premium\n"
         "/stop - Stop monitoring",
         parse_mode='HTML'
     )
@@ -3228,6 +3406,7 @@ async def status_command(update, context: ContextTypes.DEFAULT_TYPE):
         rotation_status = "🟢 Running" if bot_instance.rotation_running else "🔴 Stopped"
         ema_status = "🟢 Running" if bot_instance.ema_running else "🔴 Stopped"
         rsi_status = "🟢 Running" if bot_instance.rsi_running else "🔴 Stopped"
+        premium_status = "🟢 Running" if bot_instance.premium_running else "🔴 Stopped"
         await update.message.reply_text(
             f"<b>Bot Status:</b>\n"
             f"🚀 Breakouts: {breakout_status}\n"
@@ -3236,7 +3415,8 @@ async def status_command(update, context: ContextTypes.DEFAULT_TYPE):
             f"📈 Volume Surges: {volume_status}\n"
             f"🔄 Capital Rotation: {rotation_status}\n"
             f"🎯 EMA Alerts: {ema_status}\n"
-            f"📊 RSI Alerts: {rsi_status}",
+            f"📊 RSI Alerts: {rsi_status}\n"
+            f"💲 Coinbase Premium: {premium_status}",
             parse_mode='HTML'
         )
     else:
@@ -3552,6 +3732,25 @@ async def rotation_command(update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"❌ Error analyzing rotation: {str(e)[:100]}", parse_mode='HTML')
 
+async def premium_command(update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /premium command - check current Coinbase premium"""
+    bot_instance = context.bot_data.get('bot_instance')
+    if not bot_instance:
+        await update.message.reply_text("❌ Bot not initialized", parse_mode='HTML')
+        return
+
+    await update.message.reply_text("💲 Checking Coinbase premium...", parse_mode='HTML')
+
+    try:
+        data = bot_instance.premium_analyzer.fetch_premium()
+        if data:
+            alert = bot_instance.premium_analyzer.format_premium_alert(data)
+            await update.message.reply_text(alert, parse_mode='HTML')
+        else:
+            await update.message.reply_text("❌ Failed to fetch Coinbase premium data", parse_mode='HTML')
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error checking premium: {str(e)[:100]}", parse_mode='HTML')
+
 async def entry_command(update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /entry command - show deepest walls for entry analysis"""
     bot_instance = context.bot_data.get('bot_instance')
@@ -3667,6 +3866,7 @@ def main():
     application.add_handler(CommandHandler("rotation", rotation_command))
     application.add_handler(CommandHandler("setups", setups_command))
     application.add_handler(CommandHandler("entry", entry_command))
+    application.add_handler(CommandHandler("premium", premium_command))
     application.add_handler(CommandHandler("stop", stop_command))
 
     application.bot_data['bot_instance'] = bot
