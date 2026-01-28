@@ -14,6 +14,7 @@ from typing import Dict, List, Optional
 from dotenv import load_dotenv
 from telegram import Bot
 from telegram.ext import Application, CommandHandler, ContextTypes
+from tvDatafeed import TvDatafeed, Interval
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -52,114 +53,35 @@ class USDTDominanceAnalyzer:
         conn.close()
 
     def get_usdt_dominance_data(self) -> Optional[pd.DataFrame]:
-        """Fetch USDT dominance history purely from external APIs.
+        """Fetch USDT dominance history directly from TradingView.
 
-        USDT dominance = USDT_market_cap / Total_market_cap
-
-        Since CoinGecko free tier doesn't provide historical total market cap,
-        we estimate it using BTC + ETH market caps and their combined dominance:
-            total_mcap ≈ (btc_mcap + eth_mcap) / (btc_dom + eth_dom)
-
-        Using BTC+ETH (~69% of market) gives a more stable estimate than BTC alone.
+        Uses tvDatafeed to pull USDT.D (CRYPTOCAP:USDT.D) which represents
+        the actual USDT dominance calculated from total crypto market cap.
         """
         try:
-            # 1. Current dominance figures from /global
-            global_resp = requests.get(
-                "https://api.coingecko.com/api/v3/global", timeout=10
+            tv = TvDatafeed()
+
+            # Fetch 168 hourly bars (7 days) of USDT.D from TradingView
+            df = tv.get_hist(
+                symbol='USDT.D',
+                exchange='CRYPTOCAP',
+                interval=Interval.in_1_hour,
+                n_bars=168
             )
-            global_data = global_resp.json()
-            if 'data' not in global_data:
-                logger.error("Invalid /global response")
+
+            if df is None or len(df) < 10:
+                logger.warning("Insufficient USDT.D data from TradingView")
                 return None
 
-            current_usdt_dom = global_data['data']['market_cap_percentage'].get('usdt', 0)
-            current_btc_dom = global_data['data']['market_cap_percentage'].get('btc', 0)
-            current_eth_dom = global_data['data']['market_cap_percentage'].get('eth', 0)
+            # tvDatafeed returns: open, high, low, close, volume
+            # Use 'close' as the dominance value
+            df = df[['close']].copy()
+            df.rename(columns={'close': 'dominance'}, inplace=True)
 
-            if current_usdt_dom == 0 or current_btc_dom == 0 or current_eth_dom == 0:
-                logger.error("Dominance data returned 0")
-                return None
-
-            # Combined BTC+ETH dominance (typically ~69%, more stable than BTC alone)
-            combined_dom_fraction = (current_btc_dom + current_eth_dom) / 100.0
-
-            # 2. Fetch historical market caps for USDT, BTC, and ETH (7 days, hourly)
-            usdt_resp = requests.get(
-                "https://api.coingecko.com/api/v3/coins/tether/market_chart",
-                params={'vs_currency': 'usd', 'days': '7'},
-                timeout=10,
-            )
-            btc_resp = requests.get(
-                "https://api.coingecko.com/api/v3/coins/bitcoin/market_chart",
-                params={'vs_currency': 'usd', 'days': '7'},
-                timeout=10,
-            )
-            eth_resp = requests.get(
-                "https://api.coingecko.com/api/v3/coins/ethereum/market_chart",
-                params={'vs_currency': 'usd', 'days': '7'},
-                timeout=10,
-            )
-
-            usdt_data = usdt_resp.json().get('market_caps', [])
-            btc_data = btc_resp.json().get('market_caps', [])
-            eth_data = eth_resp.json().get('market_caps', [])
-
-            if len(usdt_data) < 10 or len(btc_data) < 10 or len(eth_data) < 10:
-                logger.warning("Insufficient market cap history from API")
-                return None
-
-            # 3. Build aligned DataFrames
-            usdt_df = pd.DataFrame(usdt_data, columns=['ts', 'usdt_mcap'])
-            usdt_df['timestamp'] = pd.to_datetime(usdt_df['ts'], unit='ms')
-            usdt_df.set_index('timestamp', inplace=True)
-            usdt_df.drop(columns=['ts'], inplace=True)
-
-            btc_df = pd.DataFrame(btc_data, columns=['ts', 'btc_mcap'])
-            btc_df['timestamp'] = pd.to_datetime(btc_df['ts'], unit='ms')
-            btc_df.set_index('timestamp', inplace=True)
-            btc_df.drop(columns=['ts'], inplace=True)
-
-            eth_df = pd.DataFrame(eth_data, columns=['ts', 'eth_mcap'])
-            eth_df['timestamp'] = pd.to_datetime(eth_df['ts'], unit='ms')
-            eth_df.set_index('timestamp', inplace=True)
-            eth_df.drop(columns=['ts'], inplace=True)
-
-            # Merge all three on nearest timestamp
-            df = pd.merge_asof(
-                usdt_df.sort_index(),
-                btc_df.sort_index(),
-                left_index=True,
-                right_index=True,
-                direction='nearest',
-                tolerance=pd.Timedelta('30min')
-            )
-            df = pd.merge_asof(
-                df.sort_index(),
-                eth_df.sort_index(),
-                left_index=True,
-                right_index=True,
-                direction='nearest',
-                tolerance=pd.Timedelta('30min')
-            )
-            df.dropna(inplace=True)
-
-            if len(df) < 10:
-                logger.warning("Insufficient aligned data points")
-                return None
-
-            # 4. Estimate total market cap using BTC+ETH
-            # total ≈ (btc_mcap + eth_mcap) / combined_dominance
-            df['total_mcap'] = (df['btc_mcap'] + df['eth_mcap']) / combined_dom_fraction
-
-            # 5. Calculate USDT dominance: usdt_mcap / total_mcap * 100
-            df['dominance'] = (df['usdt_mcap'] / df['total_mcap']) * 100
-
-            # Keep only dominance column
-            df = df[['dominance']]
-
+            current_dom = df['dominance'].iloc[-1]
             logger.info(
-                f"Fetched {len(df)} USDT.D data points from API "
-                f"(current: {current_usdt_dom:.3f}%)"
+                f"Fetched {len(df)} USDT.D data points from TradingView "
+                f"(current: {current_dom:.3f}%)"
             )
             return df
 
