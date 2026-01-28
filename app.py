@@ -54,16 +54,16 @@ class USDTDominanceAnalyzer:
     def get_usdt_dominance_data(self) -> Optional[pd.DataFrame]:
         """Fetch USDT dominance history purely from external APIs.
 
-        1. Fetch current USDT dominance % from CoinGecko /global.
-        2. Fetch the 7-day USDT market-cap time series from
-           /coins/tether/market_chart.
-        3. Scale the historical market-cap series so that the most-recent
-           value maps to the current dominance %. This produces a
-           proportionally accurate dominance time series without needing
-           the (paid) global market-cap history endpoint.
+        USDT dominance = USDT_market_cap / Total_market_cap
+
+        Since CoinGecko free tier doesn't provide historical total market cap,
+        we estimate it using BTC market cap and current BTC dominance:
+            total_mcap ≈ btc_mcap / btc_dominance
+
+        This works because BTC dominance is relatively stable short-term.
         """
         try:
-            # 1. Current dominance from /global
+            # 1. Current dominance figures from /global
             global_resp = requests.get(
                 "https://api.coingecko.com/api/v3/global", timeout=10
             )
@@ -72,40 +72,72 @@ class USDTDominanceAnalyzer:
                 logger.error("Invalid /global response")
                 return None
 
-            current_dominance = global_data['data']['market_cap_percentage'].get('usdt', 0)
-            if current_dominance == 0:
-                logger.error("USDT dominance returned 0")
+            current_usdt_dom = global_data['data']['market_cap_percentage'].get('usdt', 0)
+            current_btc_dom = global_data['data']['market_cap_percentage'].get('btc', 0)
+
+            if current_usdt_dom == 0 or current_btc_dom == 0:
+                logger.error("Dominance data returned 0")
                 return None
 
-            # 2. Historical USDT market cap (7 days → hourly granularity)
-            chart_resp = requests.get(
+            # 2. Fetch historical market caps for USDT and BTC (7 days, hourly)
+            usdt_resp = requests.get(
                 "https://api.coingecko.com/api/v3/coins/tether/market_chart",
                 params={'vs_currency': 'usd', 'days': '7'},
                 timeout=10,
             )
-            chart_data = chart_resp.json()
+            btc_resp = requests.get(
+                "https://api.coingecko.com/api/v3/coins/bitcoin/market_chart",
+                params={'vs_currency': 'usd', 'days': '7'},
+                timeout=10,
+            )
 
-            market_caps = chart_data.get('market_caps', [])
-            if not market_caps or len(market_caps) < 10:
-                logger.warning("Insufficient USDT market cap history")
+            usdt_data = usdt_resp.json().get('market_caps', [])
+            btc_data = btc_resp.json().get('market_caps', [])
+
+            if len(usdt_data) < 10 or len(btc_data) < 10:
+                logger.warning("Insufficient market cap history from API")
                 return None
 
-            # Build DataFrame from market-cap series
-            timestamps = [datetime.fromtimestamp(pt[0] / 1000) for pt in market_caps]
-            mcaps = [pt[1] for pt in market_caps]
-            df = pd.DataFrame({'mcap': mcaps}, index=timestamps)
+            # 3. Build aligned DataFrames (timestamps may differ slightly)
+            usdt_df = pd.DataFrame(usdt_data, columns=['ts', 'usdt_mcap'])
+            usdt_df['timestamp'] = pd.to_datetime(usdt_df['ts'], unit='ms')
+            usdt_df.set_index('timestamp', inplace=True)
+            usdt_df.drop(columns=['ts'], inplace=True)
 
-            # 3. Scale to dominance: latest mcap → current_dominance
-            latest_mcap = df['mcap'].iloc[-1]
-            if latest_mcap == 0:
+            btc_df = pd.DataFrame(btc_data, columns=['ts', 'btc_mcap'])
+            btc_df['timestamp'] = pd.to_datetime(btc_df['ts'], unit='ms')
+            btc_df.set_index('timestamp', inplace=True)
+            btc_df.drop(columns=['ts'], inplace=True)
+
+            # Merge on nearest timestamp (hourly data, slight offsets possible)
+            df = pd.merge_asof(
+                usdt_df.sort_index(),
+                btc_df.sort_index(),
+                left_index=True,
+                right_index=True,
+                direction='nearest',
+                tolerance=pd.Timedelta('30min')
+            )
+            df.dropna(inplace=True)
+
+            if len(df) < 10:
+                logger.warning("Insufficient aligned data points")
                 return None
-            scale_factor = current_dominance / latest_mcap
-            df['dominance'] = df['mcap'] * scale_factor
-            df.drop(columns=['mcap'], inplace=True)
+
+            # 4. Estimate total market cap: total ≈ btc_mcap / btc_dominance
+            # Use current BTC dominance as approximation (it's relatively stable)
+            btc_dom_fraction = current_btc_dom / 100.0
+            df['total_mcap'] = df['btc_mcap'] / btc_dom_fraction
+
+            # 5. Calculate USDT dominance: usdt_mcap / total_mcap * 100
+            df['dominance'] = (df['usdt_mcap'] / df['total_mcap']) * 100
+
+            # Keep only dominance column
+            df = df[['dominance']]
 
             logger.info(
                 f"Fetched {len(df)} USDT.D data points from API "
-                f"(current: {current_dominance:.3f}%)"
+                f"(current: {current_usdt_dom:.3f}%)"
             )
             return df
 
