@@ -21,16 +21,19 @@ logger = logging.getLogger(__name__)
 
 
 class USDTDominanceAnalyzer:
-    """USDT Dominance macro sentiment analysis"""
-    
+    """USDT Dominance macro sentiment analysis.
+
+    All historical data is pulled from the CoinGecko API so the analyzer
+    works immediately without needing to accumulate a local database.
+    """
+
     def __init__(self):
-        # Use persistent storage path if available, fallback to current directory
         data_dir = os.environ.get('DATA_DIR', '.')
         self.db_path = os.path.join(data_dir, "usdt_dominance.db")
         self.init_database()
-        
+
     def init_database(self):
-        """Initialize database for USDT.D data"""
+        """Keep a lightweight table for storing analysis results (alert dedup)."""
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         cursor.execute('''
@@ -45,131 +48,84 @@ class USDTDominanceAnalyzer:
                 support_level REAL
             )
         ''')
-        
-        # Create table for historical dominance data
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS usdt_dominance_history (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                timestamp DATETIME NOT NULL,
-                dominance_pct REAL NOT NULL,
-                raw_data TEXT,
-                UNIQUE(timestamp)
-            )
-        ''')
         conn.commit()
         conn.close()
-        
-    def store_current_dominance(self, dominance_pct: float, raw_data: str = None):
-        """Store current dominance data in history table"""
-        try:
-            conn = sqlite3.connect(self.db_path)
-            cursor = conn.cursor()
-            
-            # Store with current timestamp, ignore duplicates
-            cursor.execute('''
-                INSERT OR IGNORE INTO usdt_dominance_history 
-                (timestamp, dominance_pct, raw_data) 
-                VALUES (datetime('now'), ?, ?)
-            ''', (dominance_pct, raw_data or ""))
-            
-            conn.commit()
-            conn.close()
-            logger.info(f"Stored USDT dominance: {dominance_pct:.3f}%")
-            
-        except Exception as e:
-            logger.error(f"Failed to store dominance data: {e}")
-    
-    def get_historical_dominance(self, hours: int = 168) -> Optional[pd.DataFrame]:
-        """Get historical dominance data from database (default: 7 days)"""
-        try:
-            conn = sqlite3.connect(self.db_path)
-            
-            # Get historical data from database
-            query = '''
-                SELECT timestamp, dominance_pct 
-                FROM usdt_dominance_history 
-                WHERE timestamp >= datetime('now', '-{} hours')
-                ORDER BY timestamp ASC
-            '''.format(hours)
-            
-            df = pd.read_sql_query(query, conn, parse_dates=['timestamp'])
-            conn.close()
-            
-            if df.empty:
-                logger.warning("No historical dominance data found")
-                return None
-                
-            df.set_index('timestamp', inplace=True)
-            df.rename(columns={'dominance_pct': 'dominance'}, inplace=True)
-            
-            return df
-            
-        except Exception as e:
-            logger.error(f"Error fetching historical dominance data: {e}")
-            return None
-    
+
     def get_usdt_dominance_data(self) -> Optional[pd.DataFrame]:
-        """Fetch current USDT dominance and build historical dataset"""
+        """Fetch USDT dominance history purely from external APIs.
+
+        1. Fetch current USDT dominance % from CoinGecko /global.
+        2. Fetch the 7-day USDT market-cap time series from
+           /coins/tether/market_chart.
+        3. Scale the historical market-cap series so that the most-recent
+           value maps to the current dominance %. This produces a
+           proportionally accurate dominance time series without needing
+           the (paid) global market-cap history endpoint.
+        """
         try:
-            # Fetch current dominance from CoinGecko
-            url = "https://api.coingecko.com/api/v3/global"
-            response = requests.get(url, timeout=10)
-            data = response.json()
-            
-            if 'data' not in data:
-                logger.error("Invalid dominance data response")
+            # 1. Current dominance from /global
+            global_resp = requests.get(
+                "https://api.coingecko.com/api/v3/global", timeout=10
+            )
+            global_data = global_resp.json()
+            if 'data' not in global_data:
+                logger.error("Invalid /global response")
                 return None
-                
-            current_dominance = data['data']['market_cap_percentage'].get('usdt', 0)
-            
-            # Store current dominance in history
-            self.store_current_dominance(current_dominance, str(data))
-            
-            # Get historical data from database
-            historical_df = self.get_historical_dominance(hours=168)  # 7 days
-            
-            if historical_df is None or len(historical_df) < 3:
-                logger.warning("Insufficient historical data for analysis")
-                # Create minimal dataset with just current value
-                now = datetime.now()
-                df = pd.DataFrame(
-                    {'dominance': [current_dominance]},
-                    index=[now]
-                )
-                return df
-            
-            # Ensure current value is the latest
-            now = datetime.now()
-            if historical_df.index[-1] < now - pd.Timedelta(minutes=30):
-                # Add current value if last entry is older than 30 minutes
-                new_row = pd.DataFrame(
-                    {'dominance': [current_dominance]}, 
-                    index=[now]
-                )
-                historical_df = pd.concat([historical_df, new_row])
-            
-            return historical_df
-            
+
+            current_dominance = global_data['data']['market_cap_percentage'].get('usdt', 0)
+            if current_dominance == 0:
+                logger.error("USDT dominance returned 0")
+                return None
+
+            # 2. Historical USDT market cap (7 days → hourly granularity)
+            chart_resp = requests.get(
+                "https://api.coingecko.com/api/v3/coins/tether/market_chart",
+                params={'vs_currency': 'usd', 'days': '7'},
+                timeout=10,
+            )
+            chart_data = chart_resp.json()
+
+            market_caps = chart_data.get('market_caps', [])
+            if not market_caps or len(market_caps) < 10:
+                logger.warning("Insufficient USDT market cap history")
+                return None
+
+            # Build DataFrame from market-cap series
+            timestamps = [datetime.fromtimestamp(pt[0] / 1000) for pt in market_caps]
+            mcaps = [pt[1] for pt in market_caps]
+            df = pd.DataFrame({'mcap': mcaps}, index=timestamps)
+
+            # 3. Scale to dominance: latest mcap → current_dominance
+            latest_mcap = df['mcap'].iloc[-1]
+            if latest_mcap == 0:
+                return None
+            scale_factor = current_dominance / latest_mcap
+            df['dominance'] = df['mcap'] * scale_factor
+            df.drop(columns=['mcap'], inplace=True)
+
+            logger.info(
+                f"Fetched {len(df)} USDT.D data points from API "
+                f"(current: {current_dominance:.3f}%)"
+            )
+            return df
+
         except Exception as e:
             logger.error(f"Error fetching USDT dominance data: {e}")
             return None
-            
+
     def get_last_stored_analysis(self) -> Optional[Dict]:
         """Get the last stored analysis for comparison"""
         try:
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
-            
             cursor.execute('''
                 SELECT dominance_pct, sentiment, trend_direction, signal_strength, timestamp
-                FROM usdt_dominance 
-                ORDER BY timestamp DESC 
+                FROM usdt_dominance
+                ORDER BY timestamp DESC
                 LIMIT 1
             ''')
-            
             result = cursor.fetchone()
             conn.close()
-            
             if result:
                 return {
                     'dominance': result[0],
@@ -179,11 +135,10 @@ class USDTDominanceAnalyzer:
                     'timestamp': result[4]
                 }
             return None
-            
         except Exception as e:
             logger.error(f"Error fetching last analysis: {e}")
             return None
-    
+
     def analyze_dominance_sentiment(self, df: pd.DataFrame) -> Dict:
         """Analyze USDT dominance for market sentiment"""
         if len(df) < 2:
