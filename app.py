@@ -24,14 +24,21 @@ logger = logging.getLogger(__name__)
 class USDTDominanceAnalyzer:
     """USDT Dominance macro sentiment analysis.
 
-    All historical data is pulled from the CoinGecko API so the analyzer
-    works immediately without needing to accumulate a local database.
+    All historical data is pulled from TradingView via tvDatafeed.
     """
 
     def __init__(self):
         data_dir = os.environ.get('DATA_DIR', '.')
         self.db_path = os.path.join(data_dir, "usdt_dominance.db")
         self.init_database()
+
+        # Initialize TradingView data feed with credentials if available
+        tv_username = os.getenv('TV_USERNAME')
+        tv_password = os.getenv('TV_PASSWORD')
+        if tv_username and tv_password:
+            self.tv = TvDatafeed(username=tv_username, password=tv_password)
+        else:
+            self.tv = TvDatafeed()
 
     def init_database(self):
         """Keep a lightweight table for storing analysis results (alert dedup)."""
@@ -59,10 +66,8 @@ class USDTDominanceAnalyzer:
         the actual USDT dominance calculated from total crypto market cap.
         """
         try:
-            tv = TvDatafeed()
-
             # Fetch 168 hourly bars (7 days) of USDT.D from TradingView
-            df = tv.get_hist(
+            df = self.tv.get_hist(
                 symbol='USDT.D',
                 exchange='CRYPTOCAP',
                 interval=Interval.in_1_hour,
@@ -2490,10 +2495,32 @@ class CoinbasePremiumAnalyzer:
 
 
 class EnhancedTelegramBot:
+    # TradingView interval mapping
+    TV_INTERVALS = {
+        '1m': Interval.in_1_minute,
+        '5m': Interval.in_5_minute,
+        '15m': Interval.in_15_minute,
+        '30m': Interval.in_30_minute,
+        '1h': Interval.in_1_hour,
+        '4h': Interval.in_4_hour,
+        '1d': Interval.in_daily,
+    }
+
     def __init__(self, bot_token, chat_id):
         self.bot = Bot(token=bot_token)
         self.chat_id = chat_id
-        self.exchange = ccxt.binance()
+        self.exchange = ccxt.binance()  # Keep for order book data
+
+        # Initialize TradingView data feed with credentials
+        tv_username = os.getenv('TV_USERNAME')
+        tv_password = os.getenv('TV_PASSWORD')
+        if tv_username and tv_password:
+            self.tv = TvDatafeed(username=tv_username, password=tv_password)
+            logger.info("TradingView data feed initialized with authentication")
+        else:
+            self.tv = TvDatafeed()
+            logger.info("TradingView data feed initialized without authentication")
+
         self.symbols = [
             # Super Watchlist
             'BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'HYPE/USDT', 'AVAX/USDT',
@@ -2532,15 +2559,48 @@ class EnhancedTelegramBot:
         application = Application.builder().token(bot_token).build()
 
     def get_ohlcv(self, symbol, timeframe='1h', limit=50):
-        """Fetch OHLCV data"""
+        """Fetch OHLCV data from TradingView"""
         try:
-            ohlcv = self.exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
-            df = pd.DataFrame(ohlcv, columns=['timestamp','open','high','low','close','volume'])
-            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+            # Convert symbol format: 'BTC/USDT' -> 'BTCUSDT'
+            tv_symbol = symbol.replace('/', '')
+
+            # Get TradingView interval
+            interval = self.TV_INTERVALS.get(timeframe, Interval.in_1_hour)
+
+            # Fetch from TradingView
+            df = self.tv.get_hist(
+                symbol=tv_symbol,
+                exchange='BINANCE',
+                interval=interval,
+                n_bars=limit
+            )
+
+            if df is None or len(df) == 0:
+                logger.warning(f"No data from TradingView for {symbol}, falling back to ccxt")
+                # Fallback to ccxt/Binance
+                ohlcv = self.exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
+                df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+                df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+                return df
+
+            # TradingView returns datetime index, convert to match expected format
+            df = df.reset_index()
+            df = df.rename(columns={'datetime': 'timestamp'})
+            df = df[['timestamp', 'open', 'high', 'low', 'close', 'volume']]
+
             return df
+
         except Exception as e:
             logger.error(f"Error fetching {symbol}: {e}")
-            return None
+            # Fallback to ccxt/Binance
+            try:
+                ohlcv = self.exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
+                df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+                df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+                return df
+            except Exception as e2:
+                logger.error(f"Fallback also failed for {symbol}: {e2}")
+                return None
 
     def calculate_levels(self, df):
         """Calculate indicators"""
