@@ -31,14 +31,7 @@ class USDTDominanceAnalyzer:
         data_dir = os.environ.get('DATA_DIR', '.')
         self.db_path = os.path.join(data_dir, "usdt_dominance.db")
         self.init_database()
-
-        # Initialize TradingView data feed with credentials if available
-        tv_username = os.getenv('TV_USERNAME')
-        tv_password = os.getenv('TV_PASSWORD')
-        if tv_username and tv_password:
-            self.tv = TvDatafeed(username=tv_username, password=tv_password)
-        else:
-            self.tv = TvDatafeed()
+        self.tv = TvDatafeed()
 
     def init_database(self):
         """Keep a lightweight table for storing analysis results (alert dedup)."""
@@ -2510,16 +2503,7 @@ class EnhancedTelegramBot:
         self.bot = Bot(token=bot_token)
         self.chat_id = chat_id
         self.exchange = ccxt.binance()  # Keep for order book data
-
-        # Initialize TradingView data feed with credentials
-        tv_username = os.getenv('TV_USERNAME')
-        tv_password = os.getenv('TV_PASSWORD')
-        if tv_username and tv_password:
-            self.tv = TvDatafeed(username=tv_username, password=tv_password)
-            logger.info("TradingView data feed initialized with authentication")
-        else:
-            self.tv = TvDatafeed()
-            logger.info("TradingView data feed initialized without authentication")
+        self.tv = TvDatafeed()  # Anonymous TradingView data feed
 
         self.symbols = [
             # Super Watchlist
