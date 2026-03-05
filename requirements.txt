@@ -1,7 +1,6 @@
-ccxt
+ccxt==4.1.81
 pandas
 numpy
 python-telegram-bot
 python-dotenv
 tvDatafeed @ git+https://github.com/rongardF/tvdatafeed.git
-
