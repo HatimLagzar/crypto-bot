@@ -2180,179 +2180,6 @@ class EMAAnalyzer:
         return alert_msg
 
 
-class RSIAnalyzer:
-    """RSI overbought/oversold detection and alerting"""
-
-    def __init__(self):
-        data_dir = os.environ.get('DATA_DIR', '.')
-        self.db_path = os.path.join(data_dir, "orderbook_data.db")
-        self.init_database()
-        self.overbought_threshold = 70
-        self.oversold_threshold = 30
-        self.last_rsi_states = {}
-    
-    def init_database(self):
-        """Initialize RSI alerts database"""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS rsi_alerts (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                symbol TEXT,
-                rsi_value REAL,
-                price REAL,
-                alert_type TEXT,
-                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
-        conn.commit()
-        conn.close()
-    
-    def detect_rsi_signals(self, df, symbol: str) -> List[Dict]:
-        """Detect RSI overbought/oversold conditions"""
-        if len(df) < 2 or 'rsi' not in df.columns:
-            return []
-        
-        alerts = []
-        current = df.iloc[-1]
-        previous = df.iloc[-2]
-        
-        current_rsi = current['rsi']
-        previous_rsi = previous['rsi']
-        current_price = current['close']
-        
-        if pd.isna(current_rsi) or pd.isna(previous_rsi):
-            return []
-        
-        # Check for RSI entering overbought territory
-        if current_rsi >= self.overbought_threshold and previous_rsi < self.overbought_threshold:
-            if not self._was_alerted_recently(symbol, 'OVERBOUGHT'):
-                alerts.append({
-                    'symbol': symbol,
-                    'rsi_value': current_rsi,
-                    'price': current_price,
-                    'alert_type': 'OVERBOUGHT',
-                    'volume_ratio': current.get('volume_ratio', 1)
-                })
-                self._store_rsi_alert(symbol, current_rsi, current_price, 'OVERBOUGHT')
-        
-        # Check for RSI entering oversold territory
-        elif current_rsi <= self.oversold_threshold and previous_rsi > self.oversold_threshold:
-            if not self._was_alerted_recently(symbol, 'OVERSOLD'):
-                alerts.append({
-                    'symbol': symbol,
-                    'rsi_value': current_rsi,
-                    'price': current_price,
-                    'alert_type': 'OVERSOLD',
-                    'volume_ratio': current.get('volume_ratio', 1)
-                })
-                self._store_rsi_alert(symbol, current_rsi, current_price, 'OVERSOLD')
-        
-        # Check for RSI exiting extreme territories (potential reversal signals)
-        elif previous_rsi >= self.overbought_threshold and current_rsi < self.overbought_threshold:
-            if not self._was_alerted_recently(symbol, 'EXIT_OVERBOUGHT'):
-                alerts.append({
-                    'symbol': symbol,
-                    'rsi_value': current_rsi,
-                    'price': current_price,
-                    'alert_type': 'EXIT_OVERBOUGHT',
-                    'volume_ratio': current.get('volume_ratio', 1)
-                })
-                self._store_rsi_alert(symbol, current_rsi, current_price, 'EXIT_OVERBOUGHT')
-        
-        elif previous_rsi <= self.oversold_threshold and current_rsi > self.oversold_threshold:
-            if not self._was_alerted_recently(symbol, 'EXIT_OVERSOLD'):
-                alerts.append({
-                    'symbol': symbol,
-                    'rsi_value': current_rsi,
-                    'price': current_price,
-                    'alert_type': 'EXIT_OVERSOLD',
-                    'volume_ratio': current.get('volume_ratio', 1)
-                })
-                self._store_rsi_alert(symbol, current_rsi, current_price, 'EXIT_OVERSOLD')
-        
-        return alerts
-    
-    def _was_alerted_recently(self, symbol: str, alert_type: str) -> bool:
-        """Check if we already alerted for this RSI condition recently"""
-        try:
-            conn = sqlite3.connect(self.db_path)
-            cursor = conn.cursor()
-            cursor.execute('''
-                SELECT COUNT(*) FROM rsi_alerts 
-                WHERE symbol = ? AND alert_type = ?
-                AND timestamp > datetime('now', '-2 hours')
-            ''', (symbol, alert_type))
-            
-            count = cursor.fetchone()[0]
-            conn.close()
-            return count > 0
-        except Exception as e:
-            logger.error(f"Error checking recent RSI alerts: {e}")
-            return False
-    
-    def _store_rsi_alert(self, symbol: str, rsi_value: float, price: float, alert_type: str):
-        """Store RSI alert in database"""
-        try:
-            conn = sqlite3.connect(self.db_path)
-            cursor = conn.cursor()
-            cursor.execute('''
-                INSERT INTO rsi_alerts (symbol, rsi_value, price, alert_type)
-                VALUES (?, ?, ?, ?)
-            ''', (symbol, rsi_value, price, alert_type))
-            conn.commit()
-            conn.close()
-        except Exception as e:
-            logger.error(f"Error storing RSI alert: {e}")
-    
-    def format_rsi_alert(self, alert: Dict) -> str:
-        """Format RSI alert message for Telegram"""
-        symbol = alert['symbol']
-        rsi_value = alert['rsi_value']
-        price = alert['price']
-        alert_type = alert['alert_type']
-        volume_ratio = alert.get('volume_ratio', 1)
-        
-        # Base message
-        if alert_type == 'OVERBOUGHT':
-            alert_msg = f"🔴 <b>RSI OVERBOUGHT</b> 🔴\n"
-            alert_msg += f"🪙 <b>{symbol}</b>\n"
-            alert_msg += f"💰 Price: <b>${price:.4f}</b>\n"
-            alert_msg += f"📊 RSI: <b>{rsi_value:.1f}</b> (>{self.overbought_threshold})\n"
-            alert_msg += f"📈 Volume: <b>{volume_ratio:.1f}x</b>\n\n"
-            alert_msg += "⚠️ <i>Potential selling pressure ahead</i>\n"
-            alert_msg += "🎯 <i>Consider taking profits or wait for pullback</i>"
-            
-        elif alert_type == 'OVERSOLD':
-            alert_msg = f"🟢 <b>RSI OVERSOLD</b> 🟢\n"
-            alert_msg += f"🪙 <b>{symbol}</b>\n"
-            alert_msg += f"💰 Price: <b>${price:.4f}</b>\n"
-            alert_msg += f"📊 RSI: <b>{rsi_value:.1f}</b> (<{self.oversold_threshold})\n"
-            alert_msg += f"📈 Volume: <b>{volume_ratio:.1f}x</b>\n\n"
-            alert_msg += "💎 <i>Potential buying opportunity</i>\n"
-            alert_msg += "🎯 <i>Consider entry or wait for reversal confirmation</i>"
-            
-        elif alert_type == 'EXIT_OVERBOUGHT':
-            alert_msg = f"🟡 <b>RSI RECOVERY</b> 🟡\n"
-            alert_msg += f"🪙 <b>{symbol}</b>\n"
-            alert_msg += f"💰 Price: <b>${price:.4f}</b>\n"
-            alert_msg += f"📊 RSI: <b>{rsi_value:.1f}</b> (cooling down)\n"
-            alert_msg += f"📈 Volume: <b>{volume_ratio:.1f}x</b>\n\n"
-            alert_msg += "🔄 <i>Exiting overbought territory</i>\n"
-            alert_msg += "👀 <i>Potential continuation or reversal</i>"
-            
-        elif alert_type == 'EXIT_OVERSOLD':
-            alert_msg = f"🟡 <b>RSI RECOVERY</b> 🟡\n"
-            alert_msg += f"🪙 <b>{symbol}</b>\n"
-            alert_msg += f"💰 Price: <b>${price:.4f}</b>\n"
-            alert_msg += f"📊 RSI: <b>{rsi_value:.1f}</b> (recovering)\n"
-            alert_msg += f"📈 Volume: <b>{volume_ratio:.1f}x</b>\n\n"
-            alert_msg += "🔄 <i>Exiting oversold territory</i>\n"
-            alert_msg += "🚀 <i>Potential bullish momentum building</i>"
-        
-        return alert_msg
-
-
 class CoinbasePremiumAnalyzer:
     """Coinbase Premium Index – tracks the BTC price gap between Coinbase and Binance.
 
@@ -2519,15 +2346,10 @@ class EnhancedTelegramBot:
         self.lookback = 20
         self.volume_threshold = 1.5
         self.running = False
-        self.orderbook_running = False
-
-        self.orderbook_analyzer = OrderBookAnalyzer()
         self.dominance_analyzer = USDTDominanceAnalyzer()
         self.volume_analyzer = VolumeSurgeAnalyzer()
         self.rotation_analyzer = CapitalRotationAnalyzer()
-        self.setup_analyzer = OrderBookSetupAnalyzer()
         self.ema_analyzer = EMAAnalyzer()
-        self.rsi_analyzer = RSIAnalyzer()
         self.premium_analyzer = CoinbasePremiumAnalyzer()
         self.last_macd_hist = None
         self.last_vwap_price = None
@@ -2535,8 +2357,6 @@ class EnhancedTelegramBot:
         self.volume_surge_running = False
         self.rotation_running = False
         self.ema_running = False
-        self.rsi_running = False
-        self.setup_running = False
         self.premium_running = False
         self.last_dominance_sentiment = None
 
@@ -2897,26 +2717,6 @@ class EnhancedTelegramBot:
                 
         return alerts
 
-    async def order_book_monitor(self):
-        """Monitor order book every 30 minutes"""
-        while self.orderbook_running:
-            try:
-                logger.info("Running order book analysis for BTC/USDT...")
-                analysis = self.orderbook_analyzer.analyze_order_book('BTC/USDT')
-                
-                if analysis:
-                    report = self.orderbook_analyzer.generate_report(analysis)
-                    await self.send_alert(f"📊 <b>Order Book Analysis - BTC/USDT</b>\n\n{report}")
-                    self.orderbook_analyzer.store_analysis(analysis)
-                    logger.info("Order book analysis completed and sent")
-                else:
-                    logger.warning("Failed to get order book analysis")
-                    
-            except Exception as e:
-                logger.error(f"Order book monitoring error: {e}")
-                
-            await asyncio.sleep(1800)  # 30 minutes
-
     async def dominance_monitor(self):
         """Monitor USDT dominance for sentiment shifts every hour"""
         while self.dominance_running:
@@ -3029,67 +2829,6 @@ class EnhancedTelegramBot:
             logger.error(f"Error getting market sentiment: {e}")
         return None
 
-    async def setup_monitor(self):
-        """Monitor for professional trading setups based on order book"""
-        while self.setup_running:
-            try:
-                logger.info("Starting setup scanning cycle...")
-                setup_count = 0
-                
-                for symbol in self.symbols:
-                    try:
-                        # Get current price and order book
-                        ticker = await asyncio.get_event_loop().run_in_executor(
-                            None, lambda: self.exchange.fetch_ticker(symbol)
-                        )
-                        
-                        orderbook = await asyncio.get_event_loop().run_in_executor(
-                            None, lambda: self.exchange.fetch_order_book(symbol, limit=2000)
-                        )
-                        
-                        current_price = ticker['last']
-                        
-                        if not orderbook or not orderbook.get('bids') or not orderbook.get('asks'):
-                            continue
-                            
-                        # Detect breakout setups
-                        breakout_setups = self.setup_analyzer.detect_breakout_setups(
-                            orderbook, current_price, symbol
-                        )
-                        
-                        # Detect bounce setups  
-                        bounce_setups = self.setup_analyzer.detect_bounce_setups(
-                            orderbook, current_price, symbol
-                        )
-                        
-                        # Process all setups
-                        all_setups = breakout_setups + bounce_setups
-                        
-                        for setup in all_setups:
-                            # Generate and send alert
-                            alert = self.setup_analyzer.generate_setup_alert(setup)
-                            await self.send_alert(alert)
-                            
-                            # Store setup in database
-                            self.setup_analyzer.store_setup(setup)
-                            setup_count += 1
-                            
-                            logger.info(f"Setup detected: {setup['symbol']} {setup['setup_type']} {setup['direction']}")
-                            
-                    except Exception as e:
-                        logger.error(f"Setup analysis error for {symbol}: {e}")
-                        continue
-                        
-                if setup_count > 0:
-                    logger.info(f"Setup monitoring completed: {setup_count} setups detected")
-                else:
-                    logger.info("Setup monitoring completed: No setups detected")
-                    
-            except Exception as e:
-                logger.error(f"Setup monitoring error: {e}")
-                
-            await asyncio.sleep(3600)  # Check every hour
-
     async def ema_monitor(self):
         """Monitor EMA touches and crosses"""
         while self.ema_running:
@@ -3143,59 +2882,6 @@ class EnhancedTelegramBot:
                 
             await asyncio.sleep(60)  # Check every minute
 
-    async def rsi_monitor(self):
-        """Monitor RSI overbought/oversold conditions"""
-        while self.rsi_running:
-            try:
-                logger.info("Starting RSI monitoring cycle...")
-                alert_count = 0
-                
-                for symbol in self.symbols:
-                    try:
-                        # Get OHLCV data with enough history for RSI calculations
-                        df = self.get_ohlcv(symbol, timeframe='1h', limit=50)
-                        if df is None or len(df) < 15:  # Need minimum data for RSI-14 calculations
-                            logger.warning(f"Insufficient data for {symbol}: {len(df) if df is not None else 0} candles (need 15+)")
-                            continue
-                        
-                        # Calculate levels including RSI
-                        df = self.calculate_levels(df)
-                        
-                        # Detect RSI signals
-                        rsi_alerts = self.rsi_analyzer.detect_rsi_signals(df, symbol)
-                        
-                        # Debug logging
-                        if len(rsi_alerts) == 0:
-                            current_rsi = df.iloc[-1]['rsi']
-                            logger.debug(f"RSI check: {symbol} RSI={current_rsi:.1f}, no alerts")
-                        else:
-                            logger.info(f"Found {len(rsi_alerts)} RSI alerts for {symbol}")
-                        
-                        # Send alerts
-                        for alert in rsi_alerts:
-                            try:
-                                alert_message = self.rsi_analyzer.format_rsi_alert(alert)
-                                await self.send_alert(alert_message)
-                                alert_count += 1
-                                
-                                logger.info(f"RSI alert sent: {symbol} {alert['alert_type']} RSI={alert['rsi_value']:.1f}")
-                            except Exception as alert_error:
-                                logger.error(f"Failed to send RSI alert for {symbol}: {alert_error}")
-                            
-                    except Exception as e:
-                        logger.error(f"RSI analysis error for {symbol}: {e}", exc_info=True)
-                        continue
-                        
-                if alert_count > 0:
-                    logger.info(f"RSI monitoring completed: {alert_count} alerts sent")
-                else:
-                    logger.info("RSI monitoring completed: No RSI signals detected")
-                    
-            except Exception as e:
-                logger.error(f"RSI monitoring error: {e}")
-                
-            await asyncio.sleep(300)  # Check every 5 minutes
-
     async def coinbase_premium_monitor(self):
         """Monitor Coinbase Premium every 15 minutes, alert on state changes."""
         while self.premium_running:
@@ -3224,19 +2910,16 @@ class EnhancedTelegramBot:
             await asyncio.sleep(900)  # 15 minutes
 
     async def start_monitoring(self):
-        """Start both breakout and order book monitoring"""
+        """Start all automated monitoring tasks"""
         if self.running:
             logger.info("Monitoring already running")
             return
             
         self.running = True
-        self.orderbook_running = True
         self.dominance_running = True
         self.volume_surge_running = True
         self.rotation_running = True
         self.ema_running = True
-        self.rsi_running = True
-        self.setup_running = True
         self.premium_running = True
 
         logger.info("Starting enhanced monitoring...")
@@ -3244,11 +2927,7 @@ class EnhancedTelegramBot:
         # Start breakout monitoring task
         breakout_task = asyncio.create_task(self.breakout_monitor())
         logger.info("Breakout monitoring started")
-        
-        # Start order book monitoring task
-        orderbook_task = asyncio.create_task(self.order_book_monitor())
-        logger.info("Order book monitoring started")
-        
+
         # Start USDT dominance monitoring task
         dominance_task = asyncio.create_task(self.dominance_monitor())
         logger.info("USDT dominance monitoring started")
@@ -3261,17 +2940,9 @@ class EnhancedTelegramBot:
         rotation_task = asyncio.create_task(self.rotation_monitor())
         logger.info("Capital rotation monitoring started")
         
-        # Start setup monitoring task
-        setup_task = asyncio.create_task(self.setup_monitor())
-        logger.info("Setup monitoring started")
-        
         # Start EMA monitoring task
         ema_task = asyncio.create_task(self.ema_monitor())
         logger.info("EMA monitoring started")
-        
-        # Start RSI monitoring task
-        rsi_task = asyncio.create_task(self.rsi_monitor())
-        logger.info("RSI monitoring started")
 
         # Start Coinbase Premium monitoring task
         premium_task = asyncio.create_task(self.coinbase_premium_monitor())
@@ -3281,26 +2952,20 @@ class EnhancedTelegramBot:
         await self.send_alert(
             "🤖 <b>Enhanced Crypto Bot Started</b>\n\n"
             "🚀 Breakout monitoring: ACTIVE\n"
-            "📊 Order book analysis: ACTIVE\n"
             "🎯 USDT.D sentiment: ACTIVE\n"
             "📈 Volume surge alerts: ACTIVE\n"
-            "⚡ Setup detection: ACTIVE\n"
             "🔄 Capital rotation: ACTIVE\n"
             "🎯 EMA alerts: ACTIVE\n"
-            "📊 RSI alerts: ACTIVE\n"
             "💲 Coinbase premium: ACTIVE\n\n"
             f"Monitoring {len(self.symbols)} symbols"
         )
 
         return (
             breakout_task,
-            orderbook_task,
             dominance_task,
             volume_task,
             rotation_task,
-            setup_task,
             ema_task,
-            rsi_task,
             premium_task,
         )
 
@@ -3330,12 +2995,10 @@ class EnhancedTelegramBot:
 
     def stop_monitoring(self):
         self.running = False
-        self.orderbook_running = False
         self.dominance_running = False
         self.volume_surge_running = False
         self.rotation_running = False
         self.ema_running = False
-        self.rsi_running = False
         self.premium_running = False
 
 
@@ -3347,7 +3010,6 @@ async def start_command(update, context: ContextTypes.DEFAULT_TYPE):
         "🤖 <b>Enhanced Crypto Bot</b>\n\n"
         "Features:\n"
         "🚀 Breakout alerts for 19 symbols\n"
-        "📊 Order book analysis every 30min\n"
         "🎯 USDT.D macro sentiment monitoring\n"
         "📈 Volume surge early warning alerts\n"
         "🔄 Capital rotation detection\n"
@@ -3356,15 +3018,9 @@ async def start_command(update, context: ContextTypes.DEFAULT_TYPE):
         "/start - Show this message\n"
         "/status - Check bot status\n"
         "/symbols - Show monitored symbols\n"
-        "/orderbook - Get instant BTC/USDT order book analysis\n"
-        "/analyze SYMBOL - Analyze order book for specific symbol\n"
-        "/analyze all - Analyze all 19 watchlist symbols\n"
-        "/entry SYMBOL - Get optimal entry prices for symbol\n"
-        "/entry all - Show best entry opportunities across watchlist\n"
         "/dominance - Check USDT dominance sentiment\n"
         "/volume - Scan for current volume surges\n"
         "/rotation - Analyze capital rotation across watchlist\n"
-        "/setups - Scan for trading setups\n"
         "/premium - Check Coinbase premium\n"
         "/stop - Stop monitoring",
         parse_mode='HTML'
@@ -3375,22 +3031,18 @@ async def status_command(update, context: ContextTypes.DEFAULT_TYPE):
     bot_instance = context.bot_data.get('bot_instance')
     if bot_instance:
         breakout_status = "🟢 Running" if bot_instance.running else "🔴 Stopped"
-        orderbook_status = "🟢 Running" if bot_instance.orderbook_running else "🔴 Stopped"
         dominance_status = "🟢 Running" if bot_instance.dominance_running else "🔴 Stopped"
         volume_status = "🟢 Running" if bot_instance.volume_surge_running else "🔴 Stopped"
         rotation_status = "🟢 Running" if bot_instance.rotation_running else "🔴 Stopped"
         ema_status = "🟢 Running" if bot_instance.ema_running else "🔴 Stopped"
-        rsi_status = "🟢 Running" if bot_instance.rsi_running else "🔴 Stopped"
         premium_status = "🟢 Running" if bot_instance.premium_running else "🔴 Stopped"
         await update.message.reply_text(
             f"<b>Bot Status:</b>\n"
             f"🚀 Breakouts: {breakout_status}\n"
-            f"📊 Order Book: {orderbook_status}\n"
             f"🎯 USDT.D Sentiment: {dominance_status}\n"
             f"📈 Volume Surges: {volume_status}\n"
             f"🔄 Capital Rotation: {rotation_status}\n"
             f"🎯 EMA Alerts: {ema_status}\n"
-            f"📊 RSI Alerts: {rsi_status}\n"
             f"💲 Coinbase Premium: {premium_status}",
             parse_mode='HTML'
         )
@@ -3404,113 +3056,11 @@ async def symbols_command(update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"<b>Monitored Symbols ({len(symbols)}):</b>\n{symbol_list}\n\n"
         f"<b>Additional Monitoring:</b>\n"
-        f"• Order Book: BTC/USDT (every 30min)\n"
         f"• USDT.D Sentiment: Global (every 1h)\n"
         f"• Volume Surges: All symbols (every 30min)\n"
         f"• Capital Rotation: All symbols (every 30min)",
         parse_mode='HTML'
     )
-
-async def orderbook_command(update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /orderbook command - instant analysis for BTC/USDT"""
-    bot_instance = context.bot_data.get('bot_instance')
-    if not bot_instance:
-        await update.message.reply_text("❌ Bot not initialized", parse_mode='HTML')
-        return
-    await update.message.reply_text("📊 Analyzing BTC/USDT order book...", parse_mode='HTML')
-    analysis = bot_instance.orderbook_analyzer.analyze_order_book('BTC/USDT')
-    if analysis:
-        report = bot_instance.orderbook_analyzer.generate_report(analysis)
-        await update.message.reply_text(report, parse_mode='HTML')
-    else:
-        await update.message.reply_text("❌ Failed to fetch order book data for BTC/USDT", parse_mode='HTML')
-
-async def analyze_command(update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /analyze <symbol> or /analyze all command for order book analysis"""
-    bot_instance = context.bot_data.get('bot_instance')
-    if not bot_instance:
-        await update.message.reply_text("❌ Bot not initialized", parse_mode='HTML')
-        return
-
-    args = context.args
-    if not args:
-        await update.message.reply_text(
-            "Usage: /analyze SYMBOL (e.g. BTC/USDT) or /analyze all", parse_mode='HTML'
-        )
-        return
-
-    # Handle /analyze all command
-    if args[0].lower() == 'all':
-        await update.message.reply_text("📊 Analyzing all watchlist symbols... This may take a moment.", parse_mode='HTML')
-        
-        results = []
-        for symbol in bot_instance.symbols:
-            try:
-                analysis = bot_instance.orderbook_analyzer.analyze_order_book(symbol)
-                if analysis:
-                    # Create condensed report for multiple symbols
-                    mid_price = analysis['mid_price']
-                    decimals = 6 if mid_price < 1 else 4 if mid_price < 100 else 2
-                    
-                    sentiment = analysis.get('market_sentiment', 'NEUTRAL')
-                    liquidity = analysis.get('liquidity_score', 0)
-                    spread = analysis.get('spread_bps', 0)
-                    imbalance = analysis.get('immediate_imbalance', 0)
-                    
-                    # Get key levels
-                    significant_bids = analysis.get('significant_bids', [])
-                    significant_asks = analysis.get('significant_asks', [])
-                    
-                    # Use emojis for quick visual scanning
-                    sentiment_emoji = "🟢" if "BULLISH" in sentiment else "🔴" if "BEARISH" in sentiment else "⚪"
-                    
-                    # Format support/resistance levels
-                    support_text = ""
-                    resistance_text = ""
-                    
-                    if significant_bids:
-                        closest_support = significant_bids[0]  # Closest to current price
-                        support_text = f" | 🟢${closest_support['price']:.{decimals}f}({closest_support['distance_pct']:.1f}%)"
-                    
-                    if significant_asks:
-                        closest_resistance = significant_asks[0]  # Closest to current price
-                        resistance_text = f" | 🔴${closest_resistance['price']:.{decimals}f}({closest_resistance['distance_pct']:.1f}%)"
-                    
-                    results.append(
-                        f"{sentiment_emoji} <b>{symbol}</b>: ${mid_price:.{decimals}f} | "
-                        f"L:{liquidity:.0f} | S:{spread:.1f}bps | I:{imbalance:.0%}"
-                        f"{support_text}{resistance_text}"
-                    )
-                else:
-                    results.append(f"❌ <b>{symbol}</b>: Failed to fetch data")
-            except Exception as e:
-                results.append(f"⚠️ <b>{symbol}</b>: Error - {str(e)[:30]}")
-        
-        # Send results in chunks to avoid message length limits
-        chunk_size = 10
-        for i in range(0, len(results), chunk_size):
-            chunk = results[i:i+chunk_size]
-            header = f"📊 <b>Order Book Analysis ({i+1}-{min(i+chunk_size, len(results))} of {len(results)})</b>\n\n"
-            message = header + "\n".join(chunk)
-            message += "\n\n<i>L=Liquidity, S=Spread, I=Imbalance, 🟢=Support, 🔴=Resistance</i>"
-            await update.message.reply_text(message, parse_mode='HTML')
-        
-        return
-
-    # Handle single symbol analysis
-    symbol = args[0].upper()
-    # Normalize symbol if given without slash (e.g., ETHUSDT → ETH/USDT)
-    if '/' not in symbol and symbol.endswith('USDT'):
-        symbol = f"{symbol[:-4]}/USDT"
-    await update.message.reply_text(f"📊 Analyzing {symbol} order book...", parse_mode='HTML')
-    analysis = bot_instance.orderbook_analyzer.analyze_order_book(symbol)
-    if analysis:
-        report = bot_instance.orderbook_analyzer.generate_report(analysis)
-        await update.message.reply_text(report, parse_mode='HTML')
-    else:
-        await update.message.reply_text(
-            f"❌ Failed to fetch order book data for {symbol}", parse_mode='HTML'
-        )
 
 async def dominance_command(update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /dominance command - check USDT dominance sentiment"""
@@ -3589,83 +3139,6 @@ async def volume_command(update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"❌ Error scanning volumes: {str(e)[:100]}", parse_mode='HTML')
 
-async def setups_command(update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /setups command - check for current trading setups"""
-    bot_instance = context.bot_data.get('bot_instance')
-    if not bot_instance:
-        await update.message.reply_text("❌ Bot not initialized", parse_mode='HTML')
-        return
-        
-    await update.message.reply_text("⚡ Scanning for trading setups...", parse_mode='HTML')
-    
-    try:
-        setups_found = []
-        
-        for symbol in bot_instance.symbols:
-            try:
-                # Get current price and order book
-                ticker = bot_instance.exchange.fetch_ticker(symbol)
-                orderbook = bot_instance.exchange.fetch_order_book(symbol, limit=2000)
-                current_price = ticker['last']
-                
-                if not orderbook or not orderbook.get('bids') or not orderbook.get('asks'):
-                    continue
-                    
-                # Detect breakout setups
-                breakout_setups = bot_instance.setup_analyzer.detect_breakout_setups(
-                    orderbook, current_price, symbol
-                )
-                
-                # Detect bounce setups  
-                bounce_setups = bot_instance.setup_analyzer.detect_bounce_setups(
-                    orderbook, current_price, symbol
-                )
-                
-                # Combine all setups
-                all_setups = breakout_setups + bounce_setups
-                setups_found.extend(all_setups)
-                
-            except Exception as e:
-                logger.error(f"Error checking setups for {symbol}: {e}")
-                
-        if setups_found:
-            # Sort by confidence and risk/reward ratio
-            setups_found.sort(key=lambda x: (x['confidence'] == 'HIGH', x['risk_reward_ratio']), reverse=True)
-            
-            if len(setups_found) == 1:
-                # Single setup - send detailed alert
-                setup = setups_found[0]
-                alert = bot_instance.setup_analyzer.generate_setup_alert(setup)
-                await update.message.reply_text(alert, parse_mode='HTML')
-            else:
-                # Multiple setups - send summary
-                message = "⚡ <b>Trading Setups Found</b>\n\n"
-                
-                for i, setup in enumerate(setups_found[:8]):  # Show top 8
-                    setup_emoji = "🚀" if setup['setup_type'] == 'BREAKOUT' else "🎯"
-                    direction_emoji = "🟢" if setup['direction'] == 'LONG' else "🔴"
-                    confidence_emoji = "🔥" if setup['confidence'] == 'HIGH' else "⭐"
-                    
-                    # Format price with appropriate decimals
-                    price = setup['entry_price']
-                    decimals = 6 if price < 1 else 4 if price < 100 else 2
-                    
-                    message += f"{setup_emoji}{direction_emoji} <b>{setup['symbol']}</b> {setup['setup_type']}\n"
-                    message += f"   Entry: ${price:.{decimals}f} | RR: {setup['risk_reward_ratio']:.1f} {confidence_emoji}\n\n"
-                    
-                if len(setups_found) > 8:
-                    message += f"<i>...and {len(setups_found) - 8} more setups</i>\n\n"
-                    
-                message += "💡 Use /setups to scan again or check individual symbols"
-                await update.message.reply_text(message, parse_mode='HTML')
-                
-        else:
-            message = "⚡ <b>Setup Scan Complete</b>\n\n📊 No high-quality trading setups found at current market conditions."
-            await update.message.reply_text(message, parse_mode='HTML')
-            
-    except Exception as e:
-        await update.message.reply_text(f"❌ Error scanning setups: {str(e)[:100]}", parse_mode='HTML')
-
 async def rotation_command(update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /rotation command - analyze capital rotation across watchlist"""
     bot_instance = context.bot_data.get('bot_instance')
@@ -3726,89 +3199,6 @@ async def premium_command(update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"❌ Error checking premium: {str(e)[:100]}", parse_mode='HTML')
 
-async def entry_command(update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /entry command - show deepest walls for entry analysis"""
-    bot_instance = context.bot_data.get('bot_instance')
-    if not bot_instance:
-        await update.message.reply_text("❌ Bot not initialized", parse_mode='HTML')
-        return
-
-    args = context.args
-    if not args:
-        await update.message.reply_text(
-            "Usage: /entry SYMBOL (e.g. BTC/USDT) or /entry all", parse_mode='HTML'
-        )
-        return
-
-    # Handle /entry all command  
-    if args[0].lower() == 'all':
-        await update.message.reply_text("🔍 Analyzing deepest walls for all watchlist symbols...", parse_mode='HTML')
-        
-        messages = []
-        for symbol in bot_instance.symbols:
-            data = bot_instance.orderbook_analyzer.get_deepest_walls(symbol)
-            if not data:
-                continue
-            price = data['current_price']
-            text = [f"🔥 {symbol} (${price:.4f}):"]
-            # Format top bids
-            text.append("🟢 Top Bid Walls:")
-            for wall in data['bids']:
-                dist = (price - wall['price']) / price * 100
-                usdt_value = wall['quantity'] * wall['price']
-                text.append(f"  • ${wall['price']:.4f} – qty {wall['quantity']:.0f} – {dist:.2f}% below – ${usdt_value:,.0f} USDT")
-            # Format top asks
-            text.append("🔴 Top Ask Walls:")
-            for wall in data['asks']:
-                dist = (wall['price'] - price) / price * 100
-                usdt_value = wall['quantity'] * wall['price']
-                text.append(f"  • ${wall['price']:.4f} – qty {wall['quantity']:.0f} – {dist:.2f}% above – ${usdt_value:,.0f} USDT")
-            messages.append("\n".join(text))
-        
-        if not messages:
-            await update.message.reply_text("No deep walls found.", parse_mode='HTML')
-        else:
-            await update.message.reply_text("\n\n".join(messages), parse_mode='HTML')
-        return
-
-    # Single symbol analysis
-    symbol = args[0].upper()
-    if '/' not in symbol:
-        symbol += '/USDT'
-    
-    await update.message.reply_text(f"🔍 Analyzing deepest walls for {symbol}...", parse_mode='HTML')
-    
-    try:
-        data = bot_instance.orderbook_analyzer.get_deepest_walls(symbol)
-        
-        if not data:
-            await update.message.reply_text(f"❌ Unable to fetch order book data for {symbol}", parse_mode='HTML')
-            return
-        
-        price = data['current_price']
-        message = f"🔥 <b>{symbol}</b> (${price:.4f})\n\n"
-        
-        # Format top bids
-        message += "🟢 <b>Top Bid Walls:</b>\n"
-        for wall in data['bids']:
-            dist = (price - wall['price']) / price * 100
-            usdt_value = wall['quantity'] * wall['price']
-            message += f"  • ${wall['price']:.4f} – qty {wall['quantity']:.0f} – {dist:.2f}% below – ${usdt_value:,.0f} USDT\n"
-        
-        message += "\n"
-        
-        # Format top asks  
-        message += "🔴 <b>Top Ask Walls:</b>\n"
-        for wall in data['asks']:
-            dist = (wall['price'] - price) / price * 100
-            usdt_value = wall['quantity'] * wall['price']
-            message += f"  • ${wall['price']:.4f} – qty {wall['quantity']:.0f} – {dist:.2f}% above – ${usdt_value:,.0f} USDT\n"
-        
-        await update.message.reply_text(message, parse_mode='HTML')
-        
-    except Exception as e:
-        await update.message.reply_text(f"❌ Error analyzing deepest walls for {symbol}: {str(e)[:100]}", parse_mode='HTML')
-
 async def stop_command(update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /stop command"""
     bot_instance = context.bot_data.get('bot_instance')
@@ -3834,13 +3224,9 @@ def main():
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("status", status_command))
     application.add_handler(CommandHandler("symbols", symbols_command))
-    application.add_handler(CommandHandler("orderbook", orderbook_command))
-    application.add_handler(CommandHandler("analyze", analyze_command))
     application.add_handler(CommandHandler("dominance", dominance_command))
     application.add_handler(CommandHandler("volume", volume_command))
     application.add_handler(CommandHandler("rotation", rotation_command))
-    application.add_handler(CommandHandler("setups", setups_command))
-    application.add_handler(CommandHandler("entry", entry_command))
     application.add_handler(CommandHandler("premium", premium_command))
     application.add_handler(CommandHandler("stop", stop_command))
 
